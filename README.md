@@ -1,0 +1,104 @@
+# aureon-harness-demo
+
+Um **harness de agente** mínimo, em Python puro (sem dependências), inspirado na arquitetura de um sistema real de qualificação de leads por chat. Roda 100% offline com um LLM simulado e troca para modelos reais via OpenRouter com uma flag.
+
+> Os dados são fictícios (Clínica Lumina, agente Luna). Nenhum cliente, credencial, domínio ou integração do sistema original está neste repositório.
+
+## O que é um harness (e por que este repo existe)
+
+O modelo de linguagem é só uma peça. O **harness** é tudo o que o transforma num sistema confiável: o loop que decide a próxima ação, as ferramentas, o contexto, a memória, a segurança, a observabilidade e os testes. Este projeto isola cada uma dessas peças em um módulo pequeno e legível.
+
+```
+ canal (CLI / webhook simulado)
+        │
+        ▼
+ ┌─ guardrail de entrada ──(bloqueia injection)──► resposta segura
+ │       │
+ │       ▼
+ │   roteador ── classifica o lead (cold/warm/hot) ── escolhe o modelo (Haiku/Sonnet/Opus)
+ │       │
+ │       ▼
+ │   ┌──────────── loop do agente (máx. N passos) ────────────┐
+ │   │  LLM ──► tool calls ──► validação + allowlist ──► ferramentas
+ │   │   ▲                                          (RAG · agenda · orçamento)
+ │   │   └────────────── resultados (dados não confiáveis) ◄──┘
+ │   └─ fallback entre modelos · handoff para humano ──────────┘
+ │       │
+ │       ▼
+ └─ guardrail de saída (canary) ──► resposta ──► trace JSONL
+```
+
+## Rodando
+
+```bash
+python -m adapters.cli                      # conversa no terminal (LLM simulado)
+python -m evals.run_evals                   # 8 casos de avaliação
+python -m unittest                          # 20 testes (inclui rastreabilidade da spec e regras de stack)
+python -m adapters.mock_webhook --text "Quanto custa a limpeza de pele?" --replay
+python -m adapters.cli --followups --advance-hours 50
+```
+
+Com modelos reais (OpenRouter):
+
+```bash
+cp .env.example .env     # preencha OPENROUTER_API_KEY
+python -m adapters.cli --live
+python -m evals.run_evals --live
+```
+
+Ou via Docker: `docker compose run --rm app`.
+
+## Desenvolvimento orientado por spec
+
+O contrato do projeto está em [`SPEC.md`](SPEC.md): requisitos com ID (`FR-04`, `SEC-02`...), critério de aceite e a verificação automatizada de cada um. Um teste (`tests/test_spec_traceability.py`) falha se a spec citar um eval ou teste que não existe, ou se um eval existir sem requisito. O fluxo para mudar o comportamento é: spec → eval/teste que falha → código → verde. As lacunas conhecidas e o roadmap também estão lá. Stack, camadas, contratos e decisões de arquitetura (ADRs) estão em [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+
+## Mapa dos componentes
+
+| Componente | Onde | O que demonstra |
+|---|---|---|
+| Loop do agente | `harness/loop.py` | pensar → chamar ferramenta → observar; limite de passos; fallback; handoff |
+| Camada de LLM | `harness/llm.py` | interface única, OpenRouter com retry/backoff, `MockLLM` determinístico |
+| Roteamento de modelos | `harness/router.py` | modelo por temperatura do lead e cadeia de fallback |
+| Ferramentas | `harness/tools/` | schema JSON, validação de argumentos, tratamento de falha, idempotência |
+| RAG | `harness/rag.py`, `tools/knowledge.py` | chunking por seção, BM25, interface `Retriever` plugável |
+| Contexto e memória | `loop._build_messages`, `store.py` | janela de histórico, compactação simples, estado em SQLite |
+| Guardrails | `harness/guardrails.py` | defesa em duas camadas (ver abaixo) |
+| Human-in-the-loop | `tools/quote.py` | orçamento acima do limite fica `pending_human_approval` |
+| Observabilidade | `harness/tracing.py` | um trace JSONL por turno: rota, LLM, ferramentas, guardrails |
+| Avaliação | `evals/`, `tests/` | casos com resultado esperado, rodando no CI |
+| Follow-up agendado | `harness/followup.py` | regras por temperatura (48h/24h/8h) acionadas por job |
+| Canal plugável | `adapters/` | CLI e webhook simulado com HMAC-SHA256 e deduplicação |
+| Multi-tenant | `tenants/<slug>/` | nome, tom, preços, horários e ferramentas por configuração |
+
+## Segurança em duas camadas
+
+1. **Triagem por padrões**, barata e anterior ao LLM: bloqueia tentativas óbvias de injection na mensagem do usuário e **descarta trechos envenenados da base de conhecimento** (injection indireta). O arquivo `tenants/demo_clinica/kb/zz_importado_nao_confiavel.md` simula esse ataque.
+2. **Defesas estruturais**, que não dependem de reconhecer o ataque: conteúdo recuperado entra no prompt dentro de `<documento>` e é declarado como dado; *canary token* no system prompt barra vazamento; allowlist de ferramentas por tenant; validação de argumentos; aprovação humana para ações de alto valor.
+
+Limitações honestas: regex não pega todo ataque (a camada 2 existe por isso), e o `MockLLM` é determinístico, então os evals mock testam o **harness**, não a qualidade do modelo. Para isso há `--live`.
+
+## Decisões de projeto
+
+- **Sem dependências**: roda em qualquer Python 3.10+ e o CI não precisa instalar nada.
+- **Mock como cidadão de primeira classe**: o mesmo loop e os mesmos guardrails rodam com o mock e com o modelo real.
+- **Temperatura só sobe** dentro da sessão (cold → warm → hot); o lead que respondeu zera o ciclo de follow-up.
+- **Só a resposta final é persistida** entre turnos; chamadas de ferramenta vivem no trace.
+- Heurística de classificação no lugar de um classificador treinado: custo zero e auditável; a interface permite trocar.
+
+## Próximos passos possíveis
+
+Embeddings + busca vetorial (pgvector/Chroma) atrás da interface `Retriever`, busca híbrida com reranking, Google Calendar real no lugar do `FakeCalendar`, LLM-as-judge nos evals `--live`, métricas de custo por conversa a partir do `usage` nos traces.
+
+## Estrutura
+
+```
+SPEC.md     requisitos, critérios de aceite, decisões e roadmap
+docs/       ARCHITECTURE.md (stack, camadas, contratos, modelo de dados, ADRs)
+harness/    loop, llm, router, guardrails, rag, store, tracing, followup, tools/
+adapters/   cli, mock_webhook, common
+tenants/    demo_clinica/ (config.json + kb/*.md)
+evals/      cases.json + run_evals.py
+tests/      testes unitários (unittest)
+```
+
+Licença: MIT.

@@ -1,0 +1,14 @@
+services:
+  app:
+    build: .
+    stdin_open: true
+    tty: true
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      - ./state:/app/state
+      - ./traces:/app/traces
+  evals:
+    build: .
+    command: python -m evals.run_evals

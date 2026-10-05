@@ -1,0 +1,18 @@
+{
+  "clinic": "Clínica Lumina (demo fictícia)",
+  "agent": {
+    "name": "Luna",
+    "tone": "acolhedora, objetiva e sem jargão médico"
+  },
+  "business_hours": { "start": 9, "end": 18, "days": [0, 1, 2, 3, 4, 5] },
+  "prices": {
+    "limpeza de pele": 180.0,
+    "peeling químico": 250.0,
+    "microagulhamento": 420.0,
+    "drenagem linfática": 150.0,
+    "pacote noivas": 1900.0
+  },
+  "approval_threshold": 1500.0,
+  "allowed_tools": ["search_knowledge", "check_availability", "book_appointment", "create_quote"],
+  "blocked_reply": "Não consigo ajudar com esse tipo de pedido, mas posso te ajudar com procedimentos, valores e agendamentos. O que você gostaria de saber?"
+}
