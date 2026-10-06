@@ -1,6 +1,6 @@
 # SPEC — aureon-harness-demo
 
-Status: v0.2 · Esta spec é o contrato do projeto. Mudança de comportamento começa aqui, vira critério de aceite (eval ou teste) e só então vira código.
+Status: v0.3 · Esta spec é o contrato do projeto. Mudança de comportamento começa aqui, vira critério de aceite (eval ou teste) e só então vira código.
 
 > Nota de origem: a v0.1 foi escrita **depois** do primeiro código, a partir do que ele já fazia. Ela documenta e trava o comportamento atual. A partir da v0.2, o fluxo é spec primeiro (ver "Como evoluir").
 
@@ -14,18 +14,19 @@ Demonstrar, em um repositório pequeno e legível, os componentes de um harness 
 - Google Calendar real (a agenda é um `FakeCalendar` sobre SQLite)
 - Geração de PDF (o orçamento é Markdown)
 - Painel web, autenticação de usuários, multi-tenant com isolamento de banco
+- Ingestão contínua de documentos e atualização incremental do índice vetorial
 - Qualquer dado, cliente, credencial ou domínio de sistemas reais
 
 ## 3. Princípios
 
-1. **Zero dependências** de runtime. O projeto roda em Python 3.10+ puro.
+1. **Zero dependências** de runtime no núcleo. O projeto roda em Python 3.10+ puro. Integrações opcionais (pgvector) ficam isoladas em `harness/optional/` e são instaladas à parte.
 2. **Offline primeiro**: tudo roda com `MockLLM`; modelos reais são opt-in via `--live`.
 3. **Todo requisito tem verificação.** Requisito sem eval ou teste é dívida declarada (seção 7).
 4. **O modelo propõe, o harness dispõe.** Validação, permissões e limites ficam no código, não no prompt.
 
 ## 3.1 Stack e arquitetura
 
-Stack, camadas, contratos entre componentes, modelo de dados e decisões (ADR-01 a ADR-06) estão em [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). Resumo: Python 3.10+ só com biblioteca padrão, núcleo como biblioteca (sem framework web), SQLite, BM25, OpenRouter ou `MockLLM`, sem frontend. Mudança de stack começa como ADR novo naquele documento.
+Stack, camadas, contratos entre componentes, modelo de dados e decisões (ADR-01 a ADR-06) estão em [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). Resumo: Python 3.10+ só com biblioteca padrão, núcleo como biblioteca (sem framework web), SQLite, BM25 por padrão com busca híbrida (vetorial + reranking) opcional, OpenRouter ou `MockLLM`, sem frontend. Mudança de stack começa como ADR novo naquele documento.
 
 ## 4. Requisitos
 
@@ -41,7 +42,7 @@ Cada requisito tem um ID estável, um critério de aceite e a verificação auto
 - Aceite: com o modelo "hot" fora do ar, a conversa continua num modelo de fallback.
 - Verificação: `test:Routing.test_fallback_chain_goes_down` · `test:Resilience.test_model_fallback`
 
-**FR-03 Respostas ancoradas na base de conhecimento.** Preços e políticas vêm da busca na base (RAG), nunca da memória do modelo.
+**FR-03 Respostas ancoradas na base de conhecimento.** Preços e políticas vêm da busca na base (RAG), nunca da memória do modelo. A busca é BM25 por padrão (ver FR-09 para a busca híbrida).
 - Aceite: "Quanto custa a limpeza de pele?" chama `search_knowledge` e a resposta contém R$ 180,00.
 - Verificação: `eval:warm_price_uses_rag` · `test:Components.test_rag_ranks_price_chunk_first`
 
@@ -59,9 +60,27 @@ Cada requisito tem um ID estável, um critério de aceite e a verificação auto
 **FR-07 Canal plugável e seguro.** O mesmo `Agent` atende CLI e webhook. O webhook valida assinatura HMAC-SHA256 e ignora eventos duplicados.
 - Verificação: `test:Webhook.test_bad_signature_rejected` · `test:Webhook.test_duplicate_event_ignored`
 
-**FR-08 Configuração por tenant.** Persona (nome e tom), nome da empresa, catálogo de preços, horário e dias de atendimento, limite de aprovação, ferramentas permitidas, mensagem de bloqueio e base de conhecimento vêm só de `tenants/<slug>/config.json` e `tenants/<slug>/kb/`, nunca do código. Dois tenants com configurações diferentes se comportam de forma diferente, e nada de um aparece nas respostas do outro.
+**FR-08 Configuração por tenant.** Persona (nome e tom), nome da empresa, catálogo de preços, horário e dias de atendimento, limite de aprovação, ferramentas permitidas, mensagem de bloqueio e base de conhecimento e modo de busca (`retrieval`: `bm25` ou `hybrid`, e `rerank` ligado ou não) vêm só de `tenants/<slug>/config.json` e `tenants/<slug>/kb/`, nunca do código. Dois tenants com configurações diferentes se comportam de forma diferente, e nada de um aparece nas respostas do outro.
 - Aceite: com o tenant `demo_nautica` (aberto aos domingos, limite de aprovação maior, persona própria), o mesmo código agenda no domingo, aprova um orçamento que no tenant da clínica exigiria aprovação, responde com a persona própria, usa a mensagem de bloqueio própria e não conhece os preços da clínica.
 - Verificação: `eval:nautica_greeting_uses_tenant_persona` · `eval:nautica_price_from_own_kb` · `eval:nautica_books_on_sunday` · `eval:nautica_quote_within_own_threshold` · `eval:nautica_does_not_know_clinic_prices` · `eval:nautica_injection_uses_tenant_blocked_reply` · `test:TenantConfig.test_tenants_differ` · `test:TenantConfig.test_kb_dirs_are_separate`
+
+**FR-09 Busca híbrida.** Um tenant com `retrieval.mode = "hybrid"` combina BM25 e busca vetorial, fundindo os dois rankings por Reciprocal Rank Fusion (k=60). O modo padrão continua sendo `bm25`, e o tenant que não pede híbrida não muda de comportamento. A busca vetorial recupera paráfrases com variação morfológica que o BM25 não encontra ("pagamentos" → "Formas de pagamento", "trabalham" → "atendimento"). O trace de `rag_search` registra o `mode` usado.
+- Aceite: no tenant `demo_nautica` (híbrido), "Quais pagamentos vocês aceitam?" encontra a política de pagamento e a resposta contém Pix; "Vocês trabalham no domingo?" responde "todos os dias". No tenant `demo_clinica` (bm25), a mesma pergunta continua sem resposta ("Não encontrei isso na minha base"). Os evals que já passavam continuam passando no modo híbrido.
+- Limite declarado: o embedder offline é um hash de n-gramas de caracteres. Ele cobre flexão (plural, conjugação), **não** sinônimos de verdade. Ganho semântico real exige embeddings reais (`--live`), que o CI não exercita (seção 7).
+- Verificação: `eval:nautica_paraphrase_found_by_hybrid` · `eval:nautica_paraphrase_opening_days` · `eval:clinic_bm25_misses_same_paraphrase` · `test:RetrievalRecall.test_hybrid_recall_beats_bm25` · `test:Fusion.test_rrf_orders_by_combined_rank` · `test:Fusion.test_rrf_is_deterministic_on_ties`
+
+**FR-10 Reranking.** Com `retrieval.rerank = true`, os candidatos da busca são reordenados por um reranker (interface `Reranker`) antes de chegarem ao modelo. Há um reranker lexical offline e um da Cohere. Reranker que falha não derruba a busca: o harness mantém a ordem original e registra o erro.
+- Aceite: o reranker muda a ordem quando a relevância pede, preserva todos os candidatos e respeita `top_n`; falha do reranker mantém a ordem original.
+- Verificação: `test:Reranking.test_rerank_promotes_relevant_chunk` · `test:Reranking.test_rerank_keeps_candidates_and_respects_top_n` · `test:Reranking.test_rerank_failure_keeps_original_order`
+
+**FR-11 Armazenamento vetorial opcional em pgvector.** O índice vetorial pode viver em PostgreSQL com pgvector (`PgVectorStore`), com a mesma interface do `MemoryVectorStore`. A indexação é idempotente (reindexar não duplica), toda consulta é filtrada por tenant, e o ranking usa distância de cosseno (`<=>`, score = 1 − distância). A dependência (`psycopg`) é importada só quando esse store é usado e declarada em `requirements-extras.txt`.
+- Aceite: o SQL gerado filtra por tenant e ordena por `<=>`; reindexar o mesmo tenant substitui as linhas; sem `psycopg` instalado o erro diz como instalar; contra um Postgres real, o ranking é o mesmo do store em memória.
+- Verificação: `test:PgVectorStore.test_query_filters_by_tenant_and_orders_by_cosine` · `test:PgVectorStore.test_index_is_idempotent` · `test:PgVectorStore.test_missing_driver_error_is_clear` · `test:PgVectorIntegration.test_matches_memory_store_ranking` · `.github/workflows/ci.yml` (job `pgvector`)
+
+**FR-12 Clientes Cohere para embeddings e rerank.** `CohereEmbedder` e `CohereReranker` falam com a API da Cohere por `urllib`, sem SDK. A chave vem de `COHERE_API_KEY`; sem ela, o erro é claro e acontece na construção, não no meio de uma conversa.
+- Aceite: o corpo e os cabeçalhos das requisições têm o formato documentado (`input_type` `search_document` para indexar e `search_query` para consultar, lotes de até 96 textos), a resposta é interpretada corretamente e a falta da chave gera erro explícito.
+- Limite declarado: testado só contra respostas simuladas, nunca contra a API real neste repositório.
+- Verificação: `test:CohereClients.test_embed_request_shape` · `test:CohereClients.test_embed_batches_at_96` · `test:CohereClients.test_rerank_request_and_parse` · `test:CohereClients.test_missing_key_fails_early`
 
 ### Segurança
 
@@ -91,7 +110,7 @@ Cada requisito tem um ID estável, um critério de aceite e a verificação auto
 
 ### Não funcionais
 
-**NFR-01 Sem dependências e sem rede por padrão.** O CI instala nada e roda testes e evals com `MockLLM`.
+**NFR-01 Sem dependências e sem rede por padrão.** O núcleo (`harness/`, `adapters/`) usa só a biblioteca padrão. Import externo só é permitido em `harness/optional/`, dentro de função (preguiçoso) e com o pacote declarado em `requirements-extras.txt`. Testes e evals rodam offline com `MockLLM`, embedder e reranker locais, sem chaves.
 - Verificação: `test:StackRules.test_runtime_uses_only_stdlib` · `.github/workflows/ci.yml`
 
 ## 5. Decisões de arquitetura
@@ -99,7 +118,7 @@ Cada requisito tem um ID estável, um critério de aceite e a verificação auto
 | # | Decisão | Motivo | Custo |
 |---|---|---|---|
 | D1 | Classificação de lead por heurística | custo zero, auditável, interface trocável | menos precisa que um classificador treinado |
-| D2 | RAG com BM25 local | sem dependências nem chaves | sem busca semântica; limite conhecido |
+| D2 | RAG com BM25 local por padrão; híbrido opcional por tenant | sem dependências nem chaves no caminho padrão | o embedder offline não entende sinônimos; busca semântica real exige embeddings reais |
 | D3 | Só a resposta final é persistida entre turnos | histórico enxuto; ferramentas ficam no trace | o modelo não "lembra" resultados de ferramentas em turnos futuros |
 | D4 | `MockLLM` determinístico | evals reproduzíveis no CI | testa o harness, não a qualidade do modelo |
 | D5 | Guardrails em duas camadas | regex sozinha não basta | camada 1 gera falsos positivos raros |
@@ -118,11 +137,13 @@ Cada requisito tem um ID estável, um critério de aceite e a verificação auto
 - **FR-08** e **OBS-01**: fechadas na v0.2 (segundo tenant e teste do formato do trace).
 - **Isolamento entre tenants**: FR-08 prova que a base e a configuração de um tenant não vazam para outro neste demo, mas o isolamento de dados em banco (schema por cliente) está fora do escopo.
 - **FR-02/FR-03 com modelo real**: só o `--live` exercita; não há eval com juiz (LLM-as-judge).
+- **FR-09/FR-10 com embeddings reais**: o CI usa o embedder offline (n-gramas) e o reranker lexical. Não há eval com Cohere; o ganho semântico real só aparece com `--live` e chave.
+- **FR-11/FR-12**: o pgvector é exercitado no CI por um Postgres de serviço, mas o cliente Cohere nunca foi testado contra a API real (só contra respostas simuladas).
 - **Heurística de injection** (SEC-01): sem suíte adversarial ampla; os padrões cobrem os casos óbvios.
 
 ## 8. Roadmap (próximas specs)
 
 - ~~v0.2 — segundo tenant (fecha FR-08) e teste do formato de trace (fecha OBS-01)~~ (concluída)
-- v0.3 — interface `Retriever` com embeddings e busca híbrida, com eval de recall
+- ~~v0.3 — busca híbrida (BM25 + vetorial com RRF), reranking, pgvector opcional e clientes Cohere, com eval de recall~~ (esta versão)
 - v0.4 — LLM-as-judge nos evals `--live` e métrica de custo por conversa a partir do `usage`
 - v0.5 — suíte adversarial de injection (direta e indireta)
