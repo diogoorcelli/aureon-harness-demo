@@ -135,7 +135,7 @@ class MockLLM:
             add("create_quote", procedures=found)
         elif re.search(
             r"quanto|valor|preco|custa|como funciona|promocao|desconto|duracao|quanto tempo|"
-            r"quais|indicad|cuidado|pagamento|cancel|remarc|\bpix\b",
+            r"quais|indicad|cuidado|pagamento|cancel|remarc|\bpix\b|domingo|trabalh|atendem|aceit",
             t,
         ):
             add("search_knowledge", query=text)

@@ -252,23 +252,38 @@ class StackRules(unittest.TestCase):
     """Trava as regras de stack da docs/ARCHITECTURE.md."""
 
     def test_runtime_uses_only_stdlib(self):
+        """Import externo só em harness/optional/, dentro de função e declarado em requirements-extras.txt."""
         import ast
+        import re
         import sys
         from pathlib import Path
 
         root = Path(__file__).resolve().parent.parent
         local = {"harness", "adapters", "evals", "tests"}
+        extras = {
+            re.split(r"[<>=\[ ;]", line.strip())[0].lower().replace("-", "_")
+            for line in (root / "requirements-extras.txt").read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.startswith("#")
+        }
         offenders = set()
         for pkg in ("harness", "adapters"):
             for path in (root / pkg).rglob("*.py"):
-                for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                optional = "optional" in path.relative_to(root).parts
+                tree = ast.parse(path.read_text(encoding="utf-8"))
+                top_level = {id(n) for n in tree.body}
+                for node in ast.walk(tree):
                     names = []
                     if isinstance(node, ast.Import):
                         names = [a.name.split(".")[0] for a in node.names]
                     elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
                         names = [node.module.split(".")[0]]
-                    offenders |= {n for n in names if n not in sys.stdlib_module_names and n not in local}
-        self.assertEqual(offenders, set(), "dependências externas no runtime")
+                    for n in names:
+                        if n in sys.stdlib_module_names or n in local:
+                            continue
+                        allowed = optional and id(node) not in top_level and n.lower() in extras
+                        if not allowed:
+                            offenders.add(n)
+        self.assertEqual(offenders, set(), "dependências externas fora de harness/optional (ou não declaradas)")
 
     def test_layers_do_not_depend_upward(self):
         """O núcleo (harness) nunca importa dos adapters."""

@@ -19,7 +19,7 @@ from pathlib import Path
 from harness.env import load_dotenv
 from harness.llm import MockLLM, OpenRouterLLM
 from harness.loop import Agent
-from harness.rag import BM25Retriever
+from harness.retrieval import build_retriever
 from harness.store import Store
 from harness.tenant import load_tenant
 
@@ -27,16 +27,17 @@ FIXED_NOW = datetime(2026, 10, 5, 10, 0)  # segunda-feira
 CASES = Path(__file__).with_name("cases.json")
 
 
-def run_case(case: dict, llm) -> list[str]:
+def run_case(case: dict, llm, env: dict | None = None) -> list[str]:
     """Roda um caso e devolve a lista de falhas (vazia = passou).
 
+    `env={}` (padrão) mantém a recuperação 100% offline; `--live` repassa o ambiente real.
     O tenant vem do próprio caso (`"tenant"`); sem o campo, usa `demo_clinica`.
     """
     tenant = load_tenant(case.get("tenant", "demo_clinica"))
     store = Store()
     with tempfile.TemporaryDirectory() as tmp:
         os.environ["QUOTES_DIR"] = tmp
-        agent = Agent(tenant, llm, store, BM25Retriever.from_dir(tenant.kb_dir))
+        agent = Agent(tenant, llm, store, build_retriever(tenant, env={} if env is None else env))
         replies = [agent.handle(f"eval-{case['id']}", t, FIXED_NOW) for t in case["turns"]]
 
     exp, failures = case["expect"], []
@@ -68,13 +69,13 @@ def run_case(case: dict, llm) -> list[str]:
     return failures
 
 
-def run_all(llm=None) -> list[tuple[str, list[str]]]:
+def run_all(llm=None, env: dict | None = None) -> list[tuple[str, list[str]]]:
     llm = llm or MockLLM()
     cases = json.loads(CASES.read_text(encoding="utf-8"))
     results = []
     for c in cases:
         try:
-            results.append((c["id"], run_case(c, llm)))
+            results.append((c["id"], run_case(c, llm, env)))
         except Exception as exc:  # um caso quebrado reprova sozinho, não derruba a suíte
             results.append((c["id"], [f"erro ao executar: {type(exc).__name__}: {exc}"]))
     return results
@@ -85,7 +86,7 @@ def main() -> int:
     ap.add_argument("--live", action="store_true")
     args = ap.parse_args()
     load_dotenv()
-    results = run_all(OpenRouterLLM() if args.live else MockLLM())
+    results = run_all(OpenRouterLLM(), dict(os.environ)) if args.live else run_all(MockLLM())
     for cid, failures in results:
         print(f"{'PASS' if not failures else 'FAIL'}  {cid}")
         for f in failures:

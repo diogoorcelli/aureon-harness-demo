@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -26,6 +26,7 @@ class Tenant:
     blocked_reply: str
     kb_dir: Path
     canary: str
+    retrieval: dict = field(default_factory=lambda: {"mode": "bm25", "rerank": False})
 
     def procedures(self) -> list[str]:
         return list(self.prices.keys())
@@ -50,6 +51,9 @@ def load_tenant(slug: str, root: Path | None = None) -> Tenant:
     base = (root or ROOT / "tenants") / slug
     cfg = json.loads((base / "config.json").read_text(encoding="utf-8"))
     canary = "CANARY-" + hashlib.sha256(f"{slug}-canary".encode()).hexdigest()[:10]
+    retrieval = {"mode": "bm25", "rerank": False, **cfg.get("retrieval", {})}
+    if retrieval["mode"] not in ("bm25", "hybrid"):
+        raise ValueError(f"retrieval.mode inválido em {slug}: {retrieval['mode']!r} (use bm25 ou hybrid)")
     return Tenant(
         slug=slug,
         business=cfg["business"],
@@ -62,4 +66,5 @@ def load_tenant(slug: str, root: Path | None = None) -> Tenant:
         blocked_reply=cfg["blocked_reply"],
         kb_dir=base / "kb",
         canary=canary,
+        retrieval=retrieval,
     )

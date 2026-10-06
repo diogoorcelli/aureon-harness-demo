@@ -1,7 +1,7 @@
 """RAG local sem dependências: chunking por seção + BM25.
 
-`Retriever` é a interface; trocar BM25 por embeddings + vetor (pgvector, Chroma)
-é implementar outra classe com o mesmo método `search`.
+`Retriever` é a interface. BM25 é o padrão; a busca híbrida (embeddings, pgvector,
+reranking) vive em `harness/retrieval/` e implementa o mesmo método `search`.
 """
 from __future__ import annotations
 
@@ -52,6 +52,8 @@ def chunk_markdown(source: str, content: str) -> list[Chunk]:
 
 
 class BM25Retriever:
+    mode = "bm25"
+
     def __init__(self, chunks: list[Chunk], k1: float = 1.5, b: float = 0.75):
         self.chunks = chunks
         self.k1, self.b = k1, b
@@ -70,10 +72,11 @@ class BM25Retriever:
             chunks += chunk_markdown(path.name, path.read_text(encoding="utf-8"))
         return cls(chunks)
 
-    def search(self, query: str, k: int = 3) -> list[dict]:
+    def rank(self, query: str) -> list[tuple[int, float]]:
+        """(índice do chunk, score) de quem pontuou, do melhor para o pior."""
         q = [t for t in tokens(query) if t not in STOPWORDS]
         scored = []
-        for chunk, doc in zip(self.chunks, self.docs):
+        for idx, doc in enumerate(self.docs):
             tf = Counter(doc)
             score = 0.0
             for term in q:
@@ -82,9 +85,13 @@ class BM25Retriever:
                     norm_len = 1 - self.b + self.b * len(doc) / (self.avg or 1)
                     score += self.idf.get(term, 0) * f * (self.k1 + 1) / (f + self.k1 * norm_len)
             if score > 0:
-                scored.append((score, chunk))
-        scored.sort(key=lambda x: x[0], reverse=True)
+                scored.append((idx, score))
+        scored.sort(key=lambda x: (-x[1], x[0]))
+        return scored
+
+    def search(self, query: str, k: int = 3) -> list[dict]:
         return [
-            {"source": c.source, "title": c.title, "text": c.text, "score": round(s, 3)}
-            for s, c in scored[:k]
+            {"source": self.chunks[i].source, "title": self.chunks[i].title,
+             "text": self.chunks[i].text, "score": round(s, 3)}
+            for i, s in self.rank(query)[:k]
         ]

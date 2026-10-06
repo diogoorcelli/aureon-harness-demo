@@ -16,7 +16,7 @@ from harness.retrieval import (
     rerank_safely,
     rrf,
 )
-from harness.retrieval.pgvector_store import PgVectorStore
+from harness.optional.pgvector_store import PgVectorStore
 from harness.tenant import load_tenant
 
 PARAPHRASES = [
@@ -119,7 +119,7 @@ class FakeConn:
 class PgVectorStore(unittest.TestCase):
     def make(self, rows=()):
         conn = FakeConn(rows)
-        from harness.retrieval.pgvector_store import PgVectorStore as Store
+        from harness.optional.pgvector_store import PgVectorStore as Store
 
         return Store(connect=lambda: conn), conn
 
@@ -148,7 +148,7 @@ class PgVectorStore(unittest.TestCase):
         self.assertLess(deletes[1], inserts[2])  # cada reindexação apaga antes de inserir
 
     def test_missing_driver_error_is_clear(self):
-        from harness.retrieval.pgvector_store import PgVectorStore as Store
+        from harness.optional.pgvector_store import PgVectorStore as Store
 
         with mock.patch.dict(sys.modules, {"psycopg": None}):
             with self.assertRaises(ImportError) as ctx:

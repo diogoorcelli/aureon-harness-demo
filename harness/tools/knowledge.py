@@ -12,7 +12,17 @@ def _search(args: dict, ctx: ToolContext) -> dict:
     for d in dropped:
         ctx.trace.event("rag_chunk_dropped", source=d["source"], reason="embedded_instructions")
     safe = safe[:k]
-    ctx.trace.event("rag_search", query=args["query"], returned=[s["source"] for s in safe])
+    extra = {}
+    rerank_error = getattr(ctx.retriever, "last_rerank_error", None)
+    if rerank_error:
+        extra["rerank_error"] = rerank_error
+    ctx.trace.event(
+        "rag_search",
+        query=args["query"],
+        returned=[s["source"] for s in safe],
+        mode=getattr(ctx.retriever, "mode", "bm25"),
+        **extra,
+    )
     return {"results": wrap_untrusted(safe)}
 
 

@@ -7,7 +7,7 @@ from pathlib import Path
 from harness.env import load_dotenv
 from harness.llm import MockLLM, OpenRouterLLM
 from harness.loop import Agent
-from harness.rag import BM25Retriever
+from harness.retrieval import build_retriever
 from harness.store import Store
 from harness.tenant import load_tenant
 
@@ -27,7 +27,7 @@ def build_agent(
         tenant=tenant,
         llm=llm,
         store=store,
-        retriever=BM25Retriever.from_dir(tenant.kb_dir),
+        retriever=build_retriever(tenant),
         trace_dir=Path(trace_dir) if trace_dir else None,
     )
     return agent, store, tenant

@@ -13,7 +13,7 @@ QUERIES = ["Quais pagamentos vocês aceitam?", "Vocês trabalham no domingo?", "
 @unittest.skipUnless(DSN, "defina PGVECTOR_DSN para rodar contra um Postgres com pgvector")
 class PgVectorIntegration(unittest.TestCase):
     def test_matches_memory_store_ranking(self):
-        from harness.retrieval.pgvector_store import PgVectorStore
+        from harness.optional.pgvector_store import PgVectorStore
 
         chunks = BM25Retriever.from_dir(load_tenant("demo_nautica").kb_dir).chunks
         emb = HashingEmbedder(dim=128)
