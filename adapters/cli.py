@@ -35,7 +35,7 @@ def main() -> None:
         print(f"{n} follow-up(s) enviado(s).")
         return
 
-    print(f"{tenant.clinic} · agente {tenant.agent_name} · LLM: {mode}")
+    print(f"{tenant.business} · agente {tenant.agent_name} · LLM: {mode}")
     print("Comandos: /lead  /trace  /quit\n")
     last = None
     while True:

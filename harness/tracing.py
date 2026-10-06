@@ -9,6 +9,24 @@ import json
 import time
 from pathlib import Path
 
+# Catálogo fechado de eventos. Todo novo tipo entra aqui e em docs/ARCHITECTURE.md;
+# tests/test_harness.py (TraceFormat) falha se um evento emitido não estiver no catálogo
+# ou se um tipo do catálogo não estiver documentado.
+EVENT_TYPES = (
+    "route",
+    "llm_call",
+    "llm_error",
+    "tool_call",
+    "rag_search",
+    "rag_chunk_dropped",
+    "guardrail_input_blocked",
+    "guardrail_output_blocked",
+    "guardrail_tool_blocked",
+    "human_approval_required",
+    "handoff",
+    "final",
+)
+
 
 class Trace:
     def __init__(self, session_id: str, trace_dir: Path | None, user_text: str):

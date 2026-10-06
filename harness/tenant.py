@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parent.parent
 @dataclass
 class Tenant:
     slug: str
-    clinic: str
+    business: str
     agent_name: str
     tone: str
     business_hours: dict
@@ -33,8 +33,8 @@ class Tenant:
     def system_prompt(self, lead_name: str | None) -> str:
         return (
             f"Você é {self.agent_name}, atendente virtual. Tom: {self.tone}.\n"
-            f"Clínica: {self.clinic}\n"
-            f"Procedimentos disponíveis: {'; '.join(self.procedures())}\n"
+            f"Empresa: {self.business}\n"
+            f"Serviços disponíveis: {'; '.join(self.procedures())}\n"
             f"Nome do lead: {lead_name or '(desconhecido)'}\n\n"
             "Regras:\n"
             "- Responda em português, em no máximo 4 frases.\n"
@@ -52,7 +52,7 @@ def load_tenant(slug: str, root: Path | None = None) -> Tenant:
     canary = "CANARY-" + hashlib.sha256(f"{slug}-canary".encode()).hexdigest()[:10]
     return Tenant(
         slug=slug,
-        clinic=cfg["clinic"],
+        business=cfg["business"],
         agent_name=cfg["agent"]["name"],
         tone=cfg["agent"]["tone"],
         business_hours=cfg["business_hours"],

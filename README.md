@@ -32,8 +32,9 @@ O modelo de linguagem é só uma peça. O **harness** é tudo o que o transforma
 
 ```bash
 python -m adapters.cli                      # conversa no terminal (LLM simulado)
-python -m evals.run_evals                   # 8 casos de avaliação
-python -m unittest                          # 20 testes (inclui rastreabilidade da spec e regras de stack)
+python -m evals.run_evals                   # 14 casos de avaliação (2 tenants)
+python -m unittest                          # 24 testes (inclui rastreabilidade da spec e regras de stack)
+python -m adapters.cli --tenant demo_nautica   # mesmo código, outro cliente
 python -m adapters.mock_webhook --text "Quanto custa a limpeza de pele?" --replay
 python -m adapters.cli --followups --advance-hours 50
 ```
@@ -68,7 +69,7 @@ O contrato do projeto está em [`SPEC.md`](SPEC.md): requisitos com ID (`FR-04`,
 | Avaliação | `evals/`, `tests/` | casos com resultado esperado, rodando no CI |
 | Follow-up agendado | `harness/followup.py` | regras por temperatura (48h/24h/8h) acionadas por job |
 | Canal plugável | `adapters/` | CLI e webhook simulado com HMAC-SHA256 e deduplicação |
-| Multi-tenant | `tenants/<slug>/` | nome, tom, preços, horários e ferramentas por configuração |
+| Multi-tenant | `tenants/<slug>/` | persona, preços, horários, limite de aprovação, ferramentas e base por configuração; dois tenants de exemplo (`demo_clinica`, `demo_nautica`) |
 
 ## Segurança em duas camadas
 
@@ -96,7 +97,7 @@ SPEC.md     requisitos, critérios de aceite, decisões e roadmap
 docs/       ARCHITECTURE.md (stack, camadas, contratos, modelo de dados, ADRs)
 harness/    loop, llm, router, guardrails, rag, store, tracing, followup, tools/
 adapters/   cli, mock_webhook, common
-tenants/    demo_clinica/ (config.json + kb/*.md)
+tenants/    demo_clinica/ e demo_nautica/ (config.json + kb/*.md)
 evals/      cases.json + run_evals.py
 tests/      testes unitários (unittest)
 ```

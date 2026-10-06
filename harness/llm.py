@@ -143,7 +143,7 @@ class MockLLM:
 
     @staticmethod
     def _procedures(system: str) -> list[str]:
-        m = re.search(r"Procedimentos disponíveis:\s*(.+)", system)
+        m = re.search(r"Serviços disponíveis:\s*(.+)", system)
         return [p.strip() for p in m.group(1).split(";")] if m else []
 
     @staticmethod
@@ -171,12 +171,12 @@ class MockLLM:
     @staticmethod
     def _persona(system: str) -> tuple[str, str]:
         agent = re.search(r"Você é (\w+)", system)
-        clinic = re.search(r"Clínica:\s*(.+)", system)
-        return (agent.group(1) if agent else "assistente", clinic.group(1).strip() if clinic else "")
+        business = re.search(r"Empresa:\s*(.+)", system)
+        return (agent.group(1) if agent else "assistente", business.group(1).strip() if business else "")
 
     def _chitchat(self, system: str) -> str:
-        agent, clinic = self._persona(system)
-        return f"Oi! Aqui é a {agent}, da {clinic}. Como posso te ajudar hoje?"
+        agent, business = self._persona(system)
+        return f"Oi! Aqui é a {agent}, da {business}. Como posso te ajudar hoje?"
 
     def _answer(self, system: str, tool_msgs: list[dict]) -> str:
         agent, _ = self._persona(system)

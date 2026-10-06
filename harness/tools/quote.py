@@ -31,7 +31,7 @@ def _create_quote(args: dict, ctx: ToolContext) -> dict:
     ctx.store.add_quote(qid, ctx.session_id, total, status, ctx.now)
     out_dir = Path(os.getenv("QUOTES_DIR", "state/quotes"))
     out_dir.mkdir(parents=True, exist_ok=True)
-    lines = [f"# Orçamento {qid}", f"Clínica: {ctx.tenant.clinic}", f"Status: {status}", ""]
+    lines = [f"# Orçamento {qid}", f"Empresa: {ctx.tenant.business}", f"Status: {status}", ""]
     lines += [f"- {i['procedure']}: {brl(i['price'])}" for i in items]
     lines += ["", f"**Total: {brl(total)}**"]
     (out_dir / f"{qid}.md").write_text("\n".join(lines), encoding="utf-8")

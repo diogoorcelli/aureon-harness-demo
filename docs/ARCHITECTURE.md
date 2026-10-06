@@ -71,6 +71,29 @@ Trocar uma implementação (por exemplo, `BM25Retriever` por embeddings + pgvect
 
 Em qualquer falha irrecuperável (todos os modelos fora, passos esgotados, vazamento) o resultado é handoff para humano.
 
+## 5.1 Catálogo de eventos do trace
+
+Cada linha de `traces/<sessão>.jsonl` é um turno com `session`, `user`, `events`, `reply` e `total_ms`. Cada evento tem `t_ms` e `type`; os tipos possíveis são os de `EVENT_TYPES` em `harness/tracing.py`, e o último evento de um turno é sempre `final`.
+
+| Tipo | Quando é emitido |
+|---|---|
+| `route` | temperatura do lead e modelo escolhido |
+| `llm_call` | chamada ao LLM concluída (modelo, uso, ferramentas pedidas) |
+| `llm_error` | um modelo falhou; o harness tenta o próximo da cadeia |
+| `tool_call` | ferramenta executada (nome, argumentos, sucesso) |
+| `rag_search` | busca na base (consulta e fontes devolvidas) |
+| `rag_chunk_dropped` | trecho da base descartado por conter instruções embutidas |
+| `guardrail_input_blocked` | mensagem do usuário bloqueada na entrada |
+| `guardrail_output_blocked` | resposta barrada na saída (canary ou tamanho) |
+| `guardrail_tool_blocked` | ferramenta pedida fora da allowlist do tenant |
+| `human_approval_required` | ação de alto valor aguardando aprovação humana |
+| `handoff` | conversa passada a uma pessoa (LLM fora, passos esgotados ou saída barrada) |
+| `final` | fim do turno (bloqueado, handoff, número de passos) |
+
+## 5.2 Configuração por tenant
+
+Tudo o que muda de cliente para cliente fica em `tenants/<slug>/`: `config.json` (empresa, persona, preços, horário e dias de atendimento, limite de aprovação, ferramentas permitidas, mensagem de bloqueio) e `kb/*.md` (base de conhecimento). O código não tem nenhum valor específico de tenant. O repositório traz dois: `demo_clinica` (clínica de estética, fecha aos domingos, aprovação acima de R$ 1.500) e `demo_nautica` (marina, aberta todos os dias, aprovação acima de R$ 5.000), que existem para provar que o mesmo código se comporta de forma diferente só pela configuração.
+
 ## 6. Decisões (ADRs)
 
 **ADR-01 · Python.** Contexto: o projeto precisa ser legível por quem for avaliar o repositório e alinhado ao ecossistema de IA. Decisão: Python. Alternativas: TypeScript (também comum em harnesses). Consequência: o sistema real que inspirou o demo também é Python, o que facilita a comparação.

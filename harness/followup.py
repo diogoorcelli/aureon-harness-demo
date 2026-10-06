@@ -48,7 +48,7 @@ def run_followups(store: Store, tenant: Tenant, now: datetime, send: Callable[[s
     for lead in due_followups(store, now):
         nome = f", {lead['name']}" if lead.get("name") else ""
         text = TEMPLATES[lead["temperature"]].format(
-            nome=nome, agente=tenant.agent_name, clinica=tenant.clinic.split(" (")[0]
+            nome=nome, agente=tenant.agent_name, clinica=tenant.business.split(" (")[0]
         )
         send(lead["session_id"], text)
         store.add_message(lead["session_id"], "assistant", text, now)

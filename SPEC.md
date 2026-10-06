@@ -1,6 +1,6 @@
 # SPEC — aureon-harness-demo
 
-Status: v0.2 (em andamento: FR-08 e OBS-01 reescritos, verificação ainda por implementar) · Esta spec é o contrato do projeto. Mudança de comportamento começa aqui, vira critério de aceite (eval ou teste) e só então vira código.
+Status: v0.2 · Esta spec é o contrato do projeto. Mudança de comportamento começa aqui, vira critério de aceite (eval ou teste) e só então vira código.
 
 > Nota de origem: a v0.1 foi escrita **depois** do primeiro código, a partir do que ele já fazia. Ela documenta e trava o comportamento atual. A partir da v0.2, o fluxo é spec primeiro (ver "Como evoluir").
 
@@ -115,14 +115,14 @@ Cada requisito tem um ID estável, um critério de aceite e a verificação auto
 
 ## 7. Lacunas conhecidas
 
-- **FR-08**: não há teste que prove que a configuração muda o comportamento; falta um segundo tenant de exemplo.
-- **OBS-01**: não há teste direto do formato do arquivo de trace.
+- **FR-08** e **OBS-01**: fechadas na v0.2 (segundo tenant e teste do formato do trace).
+- **Isolamento entre tenants**: FR-08 prova que a base e a configuração de um tenant não vazam para outro neste demo, mas o isolamento de dados em banco (schema por cliente) está fora do escopo.
 - **FR-02/FR-03 com modelo real**: só o `--live` exercita; não há eval com juiz (LLM-as-judge).
 - **Heurística de injection** (SEC-01): sem suíte adversarial ampla; os padrões cobrem os casos óbvios.
 
 ## 8. Roadmap (próximas specs)
 
-- v0.2 — segundo tenant (fecha FR-08) e teste do formato de trace (fecha OBS-01)
+- ~~v0.2 — segundo tenant (fecha FR-08) e teste do formato de trace (fecha OBS-01)~~ (concluída)
 - v0.3 — interface `Retriever` com embeddings e busca híbrida, com eval de recall
 - v0.4 — LLM-as-judge nos evals `--live` e métrica de custo por conversa a partir do `usage`
 - v0.5 — suíte adversarial de injection (direta e indireta)
