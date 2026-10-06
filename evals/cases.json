@@ -61,7 +61,7 @@
     "id": "nautica_quote_within_own_threshold",
     "tenant": "demo_nautica",
     "turns": ["Quero um orçamento da diária da lancha e do curso de arrais"],
-    "expect": { "tools_include": ["create_quote"], "reply_contains": ["Total R$ 4000,00"], "reply_not_contains": ["aprovação"] }
+    "expect": { "tools_include": ["create_quote"], "reply_contains": ["Total R$ 4.000,00"], "reply_not_contains": ["aprovação"] }
   },
   {
     "id": "nautica_does_not_know_clinic_prices",
