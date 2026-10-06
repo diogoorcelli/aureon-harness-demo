@@ -13,3 +13,28 @@ jobs:
           python-version: ${{ matrix.python }}
       - run: python -m unittest -v
       - run: python -m evals.run_evals
+  pgvector:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      PGVECTOR_DSN: postgresql://postgres:postgres@localhost:5432/postgres
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements-extras.txt
+      - run: python -m unittest -v tests.test_pgvector_integration
+      - name: evals com o índice no pgvector
+        run: RETRIEVAL_STORE=pgvector python -m evals.run_evals

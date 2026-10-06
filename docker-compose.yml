@@ -12,3 +12,29 @@ services:
   evals:
     build: .
     command: python -m evals.run_evals
+  # Perfil opcional: Postgres com pgvector e o app usando-o como índice vetorial.
+  #   docker compose --profile pgvector run --rm app-pgvector
+  pgvector:
+    profiles: ["pgvector"]
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_PASSWORD: postgres
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 5s
+      retries: 10
+  app-pgvector:
+    profiles: ["pgvector"]
+    build:
+      context: .
+      args:
+        EXTRAS: "1"
+    command: python -m adapters.cli --tenant demo_nautica
+    stdin_open: true
+    tty: true
+    depends_on:
+      pgvector:
+        condition: service_healthy
+    environment:
+      RETRIEVAL_STORE: pgvector
+      PGVECTOR_DSN: postgresql://postgres:postgres@pgvector:5432/postgres

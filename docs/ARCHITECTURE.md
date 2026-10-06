@@ -12,12 +12,13 @@ Complementa a [`SPEC.md`](../SPEC.md): a spec diz **o que** o sistema faz; este 
 | Backend / API | nenhum framework web | o núcleo é uma biblioteca; o canal (CLI, webhook) é um adapter fino |
 | Frontend | nenhum | fora do escopo; o canal de demonstração é o terminal |
 | Banco de dados | SQLite (`sqlite3`) | estado, agenda, orçamentos e dedup de eventos |
-| Busca (RAG) | BM25 próprio | sem embeddings nesta versão |
+| Banco vetorial (opcional) | PostgreSQL + pgvector | só com `RETRIEVAL_STORE=pgvector`; `psycopg` em `requirements-extras.txt` |
+| Busca (RAG) | BM25 próprio (padrão); híbrida opcional por tenant | embeddings (hash offline ou Cohere), RRF, reranking; índice em memória ou pgvector |
 | LLM | OpenRouter via `urllib`; `MockLLM` offline | interface única `LLM.chat` |
 | Fila / cache | nenhum | deduplicação em tabela; follow-up por job chamado externamente |
 | Testes | `unittest` + evals próprios | sem pytest |
 | CI | GitHub Actions | Python 3.10 e 3.12 |
-| Empacotamento | Docker opcional | `python:3.12-slim`, sem `pip install` |
+| Empacotamento | Docker opcional | `python:3.12-slim`; `--build-arg EXTRAS=1` instala os extras |
 
 ## 2. Camadas
 
@@ -29,10 +30,10 @@ Complementa a [`SPEC.md`](../SPEC.md): a spec diz **o que** o sistema faz; este 
 │ router · guardrails · tracing · followup · tenant               │
 ├──────────────────────────────────────────────────────────────┤
 │ harness/llm.py   LLM (OpenRouter | Mock)                        │  trocáveis
-│ harness/rag.py   Retriever (BM25)                               │  atrás de
+│ harness/rag.py   Retriever (BM25) · retrieval/ (híbrida, rerank) │  atrás de
 │ harness/tools/   Tool registry (knowledge · schedule · quote)   │  interfaces
 ├──────────────────────────────────────────────────────────────┤
-│ harness/store.py SQLite                                         │  persistência
+│ harness/store.py SQLite · optional/ (pgvector)                  │  persistência
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -43,11 +44,14 @@ Regra de dependência: camadas de cima conhecem as de baixo, nunca o contrário.
 | Contrato | Assinatura | Implementações |
 |---|---|---|
 | LLM | `chat(model, messages, tools) -> LLMResponse` | `OpenRouterLLM`, `MockLLM` |
-| Retriever | `search(query, k) -> list[{source, title, text, score}]` | `BM25Retriever` |
+| Retriever | `search(query, k) -> list[{source, title, text, score}]` | `BM25Retriever`, `HybridRetriever` |
+| Embedder | `embed_documents(texts)`, `embed_query(text) -> vetor` | `HashingEmbedder` (offline), `CohereEmbedder` |
+| Reranker | `rerank(query, hits, top_n) -> hits` reordenados | `LexicalReranker` (offline), `CohereReranker` |
+| VectorStore | `index(tenant, chunks, vectors)`, `query(tenant, vector, k) -> [(idx, score)]` | `MemoryVectorStore`, `PgVectorStore` |
 | Tool | `name`, `description`, `parameters` (JSON Schema), `fn(args, ctx) -> dict` | `search_knowledge`, `check_availability`, `book_appointment`, `create_quote` |
 | Canal | chama `Agent.handle(session_id, text, now) -> AgentReply` | CLI, `mock_webhook` |
 
-Trocar uma implementação (por exemplo, `BM25Retriever` por embeddings + pgvector) não exige mexer no loop.
+Trocar uma implementação (por exemplo, o índice em memória pelo pgvector) não exige mexer no loop. `build_retriever` (`harness/retrieval/factory.py`) monta o retriever: o `config.json` do tenant diz o que ele quer, as variáveis `RETRIEVAL_*` dizem com qual infraestrutura.
 
 ## 4. Modelo de dados (SQLite)
 
@@ -58,6 +62,12 @@ Trocar uma implementação (por exemplo, `BM25Retriever` por embeddings + pgvect
 | `appointments` | agenda (FakeCalendar) | `UNIQUE(day, time)` |
 | `quotes` | orçamentos e status de aprovação | `id` |
 | `processed_events` | deduplicação de webhooks | `event_id` |
+
+Tabela opcional, em PostgreSQL (só com `PgVectorStore`):
+
+| Tabela | Papel | Chaves |
+|---|---|---|
+| `kb_chunks_<dim>` | um trecho da base por linha: `tenant`, `idx`, `source`, `title`, `body`, `embedding vector(dim)`; consulta por `embedding <=> $1` (cosseno) sempre filtrada por `tenant`; reindexar apaga as linhas do tenant e insere de novo | `(tenant, idx)` |
 
 ## 5. Fluxo de um turno
 
@@ -81,7 +91,7 @@ Cada linha de `traces/<sessão>.jsonl` é um turno com `session`, `user`, `event
 | `llm_call` | chamada ao LLM concluída (modelo, uso, ferramentas pedidas) |
 | `llm_error` | um modelo falhou; o harness tenta o próximo da cadeia |
 | `tool_call` | ferramenta executada (nome, argumentos, sucesso) |
-| `rag_search` | busca na base (consulta e fontes devolvidas) |
+| `rag_search` | busca na base (consulta, fontes devolvidas, `mode` `bm25` ou `hybrid` e, se o reranker falhou, `rerank_error`) |
 | `rag_chunk_dropped` | trecho da base descartado por conter instruções embutidas |
 | `guardrail_input_blocked` | mensagem do usuário bloqueada na entrada |
 | `guardrail_output_blocked` | resposta barrada na saída (canary ou tamanho) |
@@ -92,7 +102,7 @@ Cada linha de `traces/<sessão>.jsonl` é um turno com `session`, `user`, `event
 
 ## 5.2 Configuração por tenant
 
-Tudo o que muda de cliente para cliente fica em `tenants/<slug>/`: `config.json` (empresa, persona, preços, horário e dias de atendimento, limite de aprovação, ferramentas permitidas, mensagem de bloqueio) e `kb/*.md` (base de conhecimento). O código não tem nenhum valor específico de tenant. O repositório traz dois: `demo_clinica` (clínica de estética, fecha aos domingos, aprovação acima de R$ 1.500) e `demo_nautica` (marina, aberta todos os dias, aprovação acima de R$ 5.000), que existem para provar que o mesmo código se comporta de forma diferente só pela configuração.
+Tudo o que muda de cliente para cliente fica em `tenants/<slug>/`: `config.json` (empresa, persona, preços, horário e dias de atendimento, limite de aprovação, ferramentas permitidas, mensagem de bloqueio e `retrieval`: `{"mode": "bm25" | "hybrid", "rerank": true | false}`, padrão `bm25` sem rerank) e `kb/*.md` (base de conhecimento). O código não tem nenhum valor específico de tenant. O repositório traz dois: `demo_clinica` (clínica de estética, fecha aos domingos, aprovação acima de R$ 1.500) e `demo_nautica` (marina, aberta todos os dias, aprovação acima de R$ 5.000, busca híbrida com reranking), que existem para provar que o mesmo código se comporta de forma diferente só pela configuração.
 
 ## 6. Decisões (ADRs)
 
@@ -102,11 +112,15 @@ Tudo o que muda de cliente para cliente fica em `tenants/<slug>/`: `config.json`
 
 **ADR-03 · SQLite.** Contexto: setup zero para quem clonar. Decisão: `sqlite3` da biblioteca padrão. Alternativas: Postgres. Consequência: não escala para múltiplos processos; a interface do `Store` isola a troca.
 
-**ADR-04 · BM25 em vez de embeddings.** Contexto: embeddings exigem chave ou modelo local pesado. Decisão: BM25 próprio, atrás da interface `Retriever`. Alternativas: Cohere/OpenAI embeddings, `sentence-transformers`. Consequência: sem busca semântica ("barato" não encontra "econômico"); evolução prevista na v0.3 da spec.
+**ADR-04 · BM25 em vez de embeddings.** Contexto: embeddings exigem chave ou modelo local pesado. Decisão: BM25 próprio, atrás da interface `Retriever`. Alternativas: Cohere/OpenAI embeddings, `sentence-transformers`. Consequência: sem busca semântica ("barato" não encontra "econômico"). *Evoluída na v0.3: ver ADR-07; BM25 continua sendo o padrão.*
 
 **ADR-05 · Sem frontend.** Contexto: o demo existe para mostrar o harness. Decisão: nenhum painel; o terminal e os traces são a interface. Alternativas: painel web. Consequência: menor superfície e foco; um painel futuro consumiria os traces e a tabela `leads`.
 
 **ADR-06 · OpenRouter como gateway de modelos.** Contexto: um endpoint, vários provedores, fallback simples. Decisão: cliente HTTP mínimo compatível com a API de chat completions. Alternativas: SDK direto de um provedor. Consequência: troca de modelo por variável de ambiente; os slugs dos modelos precisam ser conferidos no catálogo.
+
+**ADR-07 · Recuperação em camadas, BM25 como padrão.** Contexto: embeddings melhoram a recuperação de paráfrases, mas custam chave, rede ou dependência, e o CI precisa continuar offline. Decisão: busca híbrida opcional por tenant (BM25 + vetorial, fusão por Reciprocal Rank Fusion com k=60, reranking opcional), tudo atrás da interface `Retriever`. O embedder padrão é um hash de n-gramas de caracteres, offline; `CohereEmbedder` e `CohereReranker` entram por variável de ambiente. Alternativas: trocar o BM25 por embeddings (perde o modo offline), `sentence-transformers` (dependência pesada). Consequência: o hash cobre flexão (plural, conjugação) mas não sinônimos; o ganho semântico real só aparece com embeddings reais, que o CI não exercita. O embedder offline também deixa passar trechos fracos; o `min_score` (0,15) e o reranker reduzem, não eliminam.
+
+**ADR-08 · Extras opcionais isolados.** Contexto: o pgvector exige `psycopg`, e o núcleo promete zero dependências. Decisão: integrações com pacote externo moram em `harness/optional/`, importam o pacote dentro de função e declaram a dependência em `requirements-extras.txt`; um teste de stack falha se isso for violado. O vetor vai como texto com cast `::vector`, então o pacote Python `pgvector` também não é necessário. Alternativas: dependência obrigatória (quebra o NFR-01), plugin separado (mais estrutura que o demo precisa). Consequência: quem não usa pgvector não instala nada; o caminho do pgvector é testado no CI com um Postgres de serviço.
 
 ## 7. Relação com o sistema real que inspirou o demo
 

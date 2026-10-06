@@ -86,7 +86,12 @@ def main() -> int:
     ap.add_argument("--live", action="store_true")
     args = ap.parse_args()
     load_dotenv()
-    results = run_all(OpenRouterLLM(), dict(os.environ)) if args.live else run_all(MockLLM())
+    if args.live:
+        results = run_all(OpenRouterLLM(), dict(os.environ))
+    else:
+        # só a escolha do índice vetorial atravessa; nenhuma chave de API (segue offline)
+        infra = {k: os.environ[k] for k in ("RETRIEVAL_STORE", "PGVECTOR_DSN") if k in os.environ}
+        results = run_all(MockLLM(), infra)
     for cid, failures in results:
         print(f"{'PASS' if not failures else 'FAIL'}  {cid}")
         for f in failures:
