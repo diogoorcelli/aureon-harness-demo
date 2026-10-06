@@ -27,9 +27,12 @@ FIXED_NOW = datetime(2026, 10, 5, 10, 0)  # segunda-feira
 CASES = Path(__file__).with_name("cases.json")
 
 
-def run_case(case: dict, llm, tenant_slug: str = "demo_clinica") -> list[str]:
-    """Roda um caso e devolve a lista de falhas (vazia = passou)."""
-    tenant = load_tenant(tenant_slug)
+def run_case(case: dict, llm) -> list[str]:
+    """Roda um caso e devolve a lista de falhas (vazia = passou).
+
+    O tenant vem do próprio caso (`"tenant"`); sem o campo, usa `demo_clinica`.
+    """
+    tenant = load_tenant(case.get("tenant", "demo_clinica"))
     store = Store()
     with tempfile.TemporaryDirectory() as tmp:
         os.environ["QUOTES_DIR"] = tmp
@@ -68,7 +71,13 @@ def run_case(case: dict, llm, tenant_slug: str = "demo_clinica") -> list[str]:
 def run_all(llm=None) -> list[tuple[str, list[str]]]:
     llm = llm or MockLLM()
     cases = json.loads(CASES.read_text(encoding="utf-8"))
-    return [(c["id"], run_case(c, llm)) for c in cases]
+    results = []
+    for c in cases:
+        try:
+            results.append((c["id"], run_case(c, llm)))
+        except Exception as exc:  # um caso quebrado reprova sozinho, não derruba a suíte
+            results.append((c["id"], [f"erro ao executar: {type(exc).__name__}: {exc}"]))
+    return results
 
 
 def main() -> int:
