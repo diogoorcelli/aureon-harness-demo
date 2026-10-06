@@ -16,4 +16,5 @@ def tokens(s: str) -> list[str]:
 
 
 def brl(value: float) -> str:
-    return f"R$ {value:.2f}".replace(".", ",")
+    """Formato brasileiro: 4000 -> 'R$ 4.000,00'."""
+    return "R$ " + f"{value:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
