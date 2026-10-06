@@ -1,6 +1,6 @@
 # SPEC — aureon-harness-demo
 
-Status: v0.1 · Esta spec é o contrato do projeto. Mudança de comportamento começa aqui, vira critério de aceite (eval ou teste) e só então vira código.
+Status: v0.2 (em andamento: FR-08 e OBS-01 reescritos, verificação ainda por implementar) · Esta spec é o contrato do projeto. Mudança de comportamento começa aqui, vira critério de aceite (eval ou teste) e só então vira código.
 
 > Nota de origem: a v0.1 foi escrita **depois** do primeiro código, a partir do que ele já fazia. Ela documenta e trava o comportamento atual. A partir da v0.2, o fluxo é spec primeiro (ver "Como evoluir").
 
@@ -59,8 +59,9 @@ Cada requisito tem um ID estável, um critério de aceite e a verificação auto
 **FR-07 Canal plugável e seguro.** O mesmo `Agent` atende CLI e webhook. O webhook valida assinatura HMAC-SHA256 e ignora eventos duplicados.
 - Verificação: `test:Webhook.test_bad_signature_rejected` · `test:Webhook.test_duplicate_event_ignored`
 
-**FR-08 Configuração por tenant.** Nome e tom do agente, preços, horários, limite de aprovação e ferramentas permitidas vêm de `tenants/<slug>/config.json`, não do código.
-- Verificação: **lacuna** (ver seção 7)
+**FR-08 Configuração por tenant.** Persona (nome e tom), nome da empresa, catálogo de preços, horário e dias de atendimento, limite de aprovação, ferramentas permitidas, mensagem de bloqueio e base de conhecimento vêm só de `tenants/<slug>/config.json` e `tenants/<slug>/kb/`, nunca do código. Dois tenants com configurações diferentes se comportam de forma diferente, e nada de um aparece nas respostas do outro.
+- Aceite: com o tenant `demo_nautica` (aberto aos domingos, limite de aprovação maior, persona própria), o mesmo código agenda no domingo, aprova um orçamento que no tenant da clínica exigiria aprovação, responde com a persona própria, usa a mensagem de bloqueio própria e não conhece os preços da clínica.
+- Verificação: `eval:nautica_greeting_uses_tenant_persona` · `eval:nautica_price_from_own_kb` · `eval:nautica_books_on_sunday` · `eval:nautica_quote_within_own_threshold` · `eval:nautica_does_not_know_clinic_prices` · `eval:nautica_injection_uses_tenant_blocked_reply` · `test:TenantConfig.test_tenants_differ` · `test:TenantConfig.test_kb_dirs_are_separate`
 
 ### Segurança
 
@@ -84,8 +85,9 @@ Cada requisito tem um ID estável, um critério de aceite e a verificação auto
 **REL-02 Loop limitado.** O loop tem número máximo de passos; ao estourar, faz handoff.
 - Verificação: `test:Resilience.test_max_steps_hands_off`
 
-**OBS-01 Trace por turno.** Cada turno grava rota, chamadas ao LLM, ferramentas, guardrails e resultado final em `traces/<sessão>.jsonl`.
-- Verificação: indireta, via `trace_events_include` em `eval:direct_prompt_injection_blocked` e `eval:indirect_injection_in_kb_dropped`
+**OBS-01 Trace por turno.** Cada turno grava uma linha JSON em `traces/<sessão>.jsonl` com `session`, `user`, `events`, `reply` e `total_ms`. Cada evento tem `t_ms` e `type`, e `type` pertence ao catálogo `EVENT_TYPES` (`harness/tracing.py`), documentado em `docs/ARCHITECTURE.md`. O último evento de todo turno é `final`.
+- Aceite: o arquivo de trace de uma sessão com vários turnos é JSONL válido, todo evento emitido está no catálogo e todo tipo do catálogo está documentado.
+- Verificação: `test:TraceFormat.test_trace_file_schema` · `test:TraceFormat.test_event_types_are_documented`
 
 ### Não funcionais
 
