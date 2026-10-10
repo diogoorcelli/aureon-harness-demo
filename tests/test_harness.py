@@ -108,6 +108,109 @@ class Resilience(unittest.TestCase):
         reply = agent.handle("s", "oi", FIXED_NOW)
         self.assertIn("guardrail_tool_blocked", reply.trace.kinds())
 
+    @staticmethod
+    def _handoff_reason(reply):
+        return next(e["reason"] for e in reply.trace.turn["events"] if e["type"] == "handoff")
+
+    def test_empty_reply_hands_off(self):
+        class Silent:
+            def chat(self, model, messages, tools=None):
+                return LLMResponse("", [], model)
+
+        agent, _ = make_agent(Silent())
+        reply = agent.handle("s", "oi", FIXED_NOW)
+        self.assertTrue(reply.handoff)
+        self.assertEqual(reply.text, HANDOFF_REPLY)
+        self.assertEqual(self._handoff_reason(reply), "empty_reply")
+
+    def test_unexpected_llm_exception_falls_back(self):
+        hot = ModelRouter().models["hot"]
+
+        class Buggy(FailingOnModel):
+            def chat(self, model, messages, tools=None):
+                if model == self.bad:
+                    raise IndexError("list index out of range")
+                return self.inner.chat(model, messages, tools)
+
+        agent, _ = make_agent(Buggy(hot))
+        reply = agent.handle("s", "Quero agendar limpeza de pele amanhã às 14h", FIXED_NOW)
+        self.assertFalse(reply.handoff)
+        self.assertIn("Agendado", reply.text)
+        errors = [e for e in reply.trace.turn["events"] if e["type"] == "llm_error"]
+        self.assertIn("IndexError", errors[0]["error"])
+
+    def test_reply_reports_effective_model(self):
+        router = ModelRouter()
+        agent, _ = make_agent(FailingOnModel(router.models["hot"]))
+        reply = agent.handle("s", "Quero agendar limpeza de pele amanhã às 14h", FIXED_NOW)
+        events = reply.trace.turn["events"]
+        self.assertEqual(next(e["model"] for e in events if e["type"] == "route"), router.models["hot"])
+        self.assertEqual(reply.model, router.models["warm"])
+        self.assertEqual(events[-1]["model"], router.models["warm"])
+
+    def test_turn_deadline_hands_off(self):
+        clock = {"t": 0.0}
+
+        class Slow(LoopsForever):
+            def chat(self, model, messages, tools=None):
+                clock["t"] += 30  # cada chamada leva 30 s
+                return super().chat(model, messages, tools)
+
+        tenant = load_tenant("demo_clinica")
+        agent = Agent(
+            tenant, Slow(), Store(), BM25Retriever.from_dir(tenant.kb_dir),
+            turn_deadline_s=45, clock=lambda: clock["t"],
+        )
+        reply = agent.handle("s", "Quanto custa?", FIXED_NOW)
+        self.assertTrue(reply.handoff)
+        self.assertEqual(self._handoff_reason(reply), "deadline_exceeded")
+        self.assertLess(reply.steps, agent.max_steps)
+
+    def test_token_budget_hands_off(self):
+        class Expensive:
+            def chat(self, model, messages, tools=None):
+                return LLMResponse("", [ToolCall("c", "search_knowledge", {"query": "x"})], model, {"total_tokens": 15000})
+
+        tenant = load_tenant("demo_clinica")
+        agent = Agent(tenant, Expensive(), Store(), BM25Retriever.from_dir(tenant.kb_dir), turn_token_budget=20000)
+        reply = agent.handle("s", "Quanto custa?", FIXED_NOW)
+        self.assertTrue(reply.handoff)
+        self.assertEqual(self._handoff_reason(reply), "token_budget_exceeded")
+        self.assertEqual(reply.steps, 2)
+
+    def test_tool_call_limit_hands_off(self):
+        class Greedy:
+            def chat(self, model, messages, tools=None):
+                calls = [ToolCall(f"c{i}", "search_knowledge", {"query": "x"}) for i in range(5)]
+                return LLMResponse("", calls, model)
+
+        tenant = load_tenant("demo_clinica")
+        agent = Agent(tenant, Greedy(), Store(), BM25Retriever.from_dir(tenant.kb_dir), max_tool_calls=8)
+        reply = agent.handle("s", "Quanto custa?", FIXED_NOW)
+        self.assertTrue(reply.handoff)
+        self.assertEqual(self._handoff_reason(reply), "tool_call_limit_exceeded")
+        self.assertLessEqual(len(reply.tools_called), 8)
+
+    def test_internal_error_hands_off(self):
+        from harness.tools import default_registry
+
+        class BrokenRegistry(type(default_registry())):
+            def call(self, name, args, ctx):
+                raise RuntimeError("bug fora da ferramenta")
+
+        registry = BrokenRegistry()
+        for tool in default_registry()._tools.values():
+            registry.register(tool)
+        tenant = load_tenant("demo_clinica")
+        store = Store()
+        agent = Agent(tenant, MockLLM(), store, BM25Retriever.from_dir(tenant.kb_dir), registry=registry)
+        reply = agent.handle("s", "Quanto custa a limpeza de pele?", FIXED_NOW)
+        self.assertTrue(reply.handoff)
+        self.assertEqual(reply.text, HANDOFF_REPLY)
+        handoff = next(e for e in reply.trace.turn["events"] if e["type"] == "handoff")
+        self.assertEqual((handoff["reason"], handoff["error"]), ("internal_error", "RuntimeError"))
+        self.assertEqual(store.count_messages("s"), 2)  # pergunta e resposta persistidas
+
 
 class Components(unittest.TestCase):
     def test_rag_ranks_price_chunk_first(self):
@@ -187,6 +290,24 @@ class TenantConfig(unittest.TestCase):
         for name in a.prices:  # nenhum procedimento da clínica aparece na base náutica
             self.assertFalse(any(norm(name) in norm(t) for t in texts_b), name)
 
+    def test_quotes_and_traces_are_separated_by_tenant(self):
+        """Mesmo ID de sessão em dois tenants: orçamentos e traces não se misturam."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            asks = {"demo_clinica": "Quero um orçamento da limpeza de pele", "demo_nautica": "Quero um orçamento do passeio de escuna"}
+            with mock.patch.dict(os.environ, {"QUOTES_DIR": str(tmp / "quotes")}):
+                for slug, text in asks.items():
+                    tenant = load_tenant(slug)
+                    agent = Agent(tenant, MockLLM(), Store(), BM25Retriever.from_dir(tenant.kb_dir), trace_dir=tmp / "traces")
+                    self.assertIn("create_quote", agent.handle("mesma-sessao", text, FIXED_NOW).tools_called)
+            quote_files = {p.parent.name: p.name for p in (tmp / "quotes").rglob("*.md")}
+            self.assertEqual(set(quote_files), set(asks))
+            self.assertNotEqual(quote_files["demo_clinica"], quote_files["demo_nautica"])
+            traces = list((tmp / "traces").glob("*.jsonl"))
+            self.assertEqual(len(traces), 2)
+            tenants = {json.loads(p.read_text(encoding="utf-8").splitlines()[0])["tenant"] for p in traces}
+            self.assertEqual(tenants, set(asks))
+
 
 class TraceFormat(unittest.TestCase):
     """OBS-01: o arquivo de trace tem formato estável e documentado."""
@@ -216,14 +337,17 @@ class TraceFormat(unittest.TestCase):
         return traces
 
     def test_trace_file_schema(self):
+        from harness.tracing import session_ref
+
+        ref = session_ref("demo_clinica", "s-trace")
         with tempfile.TemporaryDirectory() as tmp:
             traces = self._run(Path(tmp))
-            lines = (traces / "s-trace.jsonl").read_text(encoding="utf-8").splitlines()
+            lines = (traces / f"{ref}.jsonl").read_text(encoding="utf-8").splitlines()
             self.assertEqual(len(lines), len(self.SCENARIOS))
             for line in lines:
                 turn = json.loads(line)
-                self.assertEqual(set(turn), {"session", "user", "events", "reply", "total_ms"})
-                self.assertEqual(turn["session"], "s-trace")
+                self.assertEqual(set(turn), {"session", "tenant", "user", "events", "reply", "total_ms"})
+                self.assertEqual((turn["session"], turn["tenant"]), (ref, "demo_clinica"))
                 self.assertTrue(turn["events"])
                 stamps = [e["t_ms"] for e in turn["events"]]
                 self.assertEqual(stamps, sorted(stamps))
