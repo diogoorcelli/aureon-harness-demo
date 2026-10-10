@@ -32,8 +32,8 @@ SEARCH_KNOWLEDGE = Tool(
     parameters={
         "type": "object",
         "properties": {
-            "query": {"type": "string"},
-            "k": {"type": "integer"},
+            "query": {"type": "string", "minLength": 1, "maxLength": 500},
+            "k": {"type": "integer", "minimum": 1, "maximum": 10},
         },
         "required": ["query"],
     },

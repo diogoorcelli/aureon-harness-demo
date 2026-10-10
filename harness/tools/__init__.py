@@ -50,7 +50,8 @@ class ToolRegistry:
             if t.name in allowed
         ]
 
-    def call(self, name: str, args: dict, ctx: ToolContext) -> dict:
+    def call(self, name: str, args: object, ctx: ToolContext) -> dict:
+        """`args` vem do modelo e pode não ser um objeto; `validate_args` recusa antes de executar."""
         tool = self._tools.get(name)
         if tool is None:
             return {"error": "unknown_tool", "message": f"Ferramenta desconhecida: {name}"}

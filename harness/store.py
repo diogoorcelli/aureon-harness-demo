@@ -132,23 +132,28 @@ class Store:
         return {r["time"] for r in rows}
 
     def book(self, sid: str, day: str, time: str, procedure: str, now: datetime):
-        """Retorna (status, row). Idempotente: mesma sessão + mesmo horário não duplica."""
+        """Retorna (status, row). Idempotente: mesma sessão + mesmo horário não duplica.
+
+        Insere primeiro e deixa o UNIQUE(day, time) decidir: não há janela entre
+        checar e inserir em que outra conexão possa ocupar o horário.
+        """
+        try:
+            self.db.execute(
+                "INSERT INTO appointments(session_id, day, time, procedure, created_ts) "
+                "VALUES (?,?,?,?,?)",
+                (sid, day, time, procedure, _iso(now)),
+            )
+            self.db.commit()
+            inserted = True
+        except sqlite3.IntegrityError:
+            self.db.rollback()  # libera a transação aberta pelo INSERT recusado
+            inserted = False
         row = self.db.execute(
             "SELECT * FROM appointments WHERE day=? AND time=?", (day, time)
         ).fetchone()
-        if row:
-            status = "already_booked" if row["session_id"] == sid else "slot_taken"
-            return status, dict(row)
-        self.db.execute(
-            "INSERT INTO appointments(session_id, day, time, procedure, created_ts) "
-            "VALUES (?,?,?,?,?)",
-            (sid, day, time, procedure, _iso(now)),
-        )
-        self.db.commit()
-        row = self.db.execute(
-            "SELECT * FROM appointments WHERE day=? AND time=?", (day, time)
-        ).fetchone()
-        return "confirmed", dict(row)
+        if inserted:
+            return "confirmed", dict(row)
+        return ("already_booked" if row["session_id"] == sid else "slot_taken"), dict(row)
 
     def count_appointments(self, sid: str | None = None) -> int:
         if sid:
@@ -158,12 +163,19 @@ class Store:
         return self.db.execute(q, a).fetchone()["c"]
 
     # --- orçamentos --------------------------------------------------------
-    def add_quote(self, qid: str, sid: str, total: float, status: str, now: datetime) -> None:
-        self.db.execute(
-            "INSERT OR REPLACE INTO quotes(id, session_id, total, status, created_ts) "
-            "VALUES (?,?,?,?,?)",
+    def add_quote(self, qid: str, sid: str, total: float, status: str, now: datetime) -> bool:
+        """Grava ou atualiza o orçamento da própria sessão. False se o id pertence a outra sessão."""
+        cur = self.db.execute(
+            "INSERT INTO quotes(id, session_id, total, status, created_ts) VALUES (?,?,?,?,?) "
+            "ON CONFLICT(id) DO UPDATE SET total=excluded.total, status=excluded.status, "
+            "created_ts=excluded.created_ts WHERE quotes.session_id = excluded.session_id",
             (qid, sid, total, status, _iso(now)),
         )
+        self.db.commit()
+        return cur.rowcount == 1
+
+    def delete_quote(self, qid: str, sid: str) -> None:
+        self.db.execute("DELETE FROM quotes WHERE id=? AND session_id=?", (qid, sid))
         self.db.commit()
 
     # --- webhooks ----------------------------------------------------------

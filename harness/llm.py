@@ -20,14 +20,11 @@ class LLMError(Exception):
     pass
 
 
-LLM_ERRORS = (LLMError,)
-
-
 @dataclass
 class ToolCall:
     id: str
     name: str
-    arguments: dict
+    arguments: object  # normalmente dict; o que o modelo mandou, validado depois pelo registry
 
 
 @dataclass
@@ -68,24 +65,33 @@ class OpenRouterLLM:
         for attempt in range(self.retries + 1):
             try:
                 with urllib.request.urlopen(req, timeout=self.timeout) as r:
-                    data = json.loads(r.read())
-                msg = data["choices"][0]["message"]
-                calls = []
-                for tc in msg.get("tool_calls") or []:
-                    try:
-                        args = json.loads(tc["function"].get("arguments") or "{}")
-                    except json.JSONDecodeError:
-                        args = {}
-                    calls.append(ToolCall(tc["id"], tc["function"]["name"], args))
-                return LLMResponse(msg.get("content") or "", calls, model, data.get("usage", {}))
+                    return self._parse(json.loads(r.read()), model)
             except urllib.error.HTTPError as e:
                 last_err = f"HTTP {e.code}"
                 if e.code not in (429, 500, 502, 503, 504):
                     raise LLMError(last_err) from e
-            except (urllib.error.URLError, TimeoutError, KeyError, json.JSONDecodeError) as e:
+            except (urllib.error.URLError, TimeoutError, ValueError) as e:  # ValueError inclui JSON inválido
                 last_err = type(e).__name__
             time.sleep(2**attempt)
         raise LLMError(f"falha após {self.retries + 1} tentativas: {last_err}")
+
+    @staticmethod
+    def _parse(data: object, model: str) -> LLMResponse:
+        """Interpreta a resposta; qualquer formato inesperado vira ValueError (e depois LLMError)."""
+        try:
+            msg = data["choices"][0]["message"]
+            calls = []
+            for tc in msg.get("tool_calls") or []:
+                raw = tc["function"].get("arguments") or "{}"
+                try:
+                    args = json.loads(raw)
+                except json.JSONDecodeError:
+                    args = raw  # não vira {} em silêncio: o registry recusa como invalid_arguments
+                calls.append(ToolCall(tc["id"], tc["function"]["name"], args))
+            usage = data.get("usage") or {}
+            return LLMResponse(msg.get("content") or "", calls, model, usage if isinstance(usage, dict) else {})
+        except (KeyError, IndexError, TypeError, AttributeError) as e:
+            raise ValueError(f"resposta malformada: {type(e).__name__}") from e
 
 
 # --------------------------------------------------------------------------- #

@@ -9,7 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 from adapters.common import build_agent
 from harness.followup import run_followups
@@ -30,8 +30,8 @@ def main() -> None:
     mode = "OpenRouter" if args.live else "mock (sem rede)"
 
     if args.followups:
-        now = datetime.now() + timedelta(hours=args.advance_hours)
-        n = run_followups(store, tenant, now, lambda sid, text: print(f"[follow-up → {sid}] {text}"))
+        now = tenant.now() + timedelta(hours=args.advance_hours)  # relógio do tenant (FR-13)
+        n = run_followups(store, tenant, now, lambda sid, text: print(f"[follow-up -> {sid}] {text}"))
         print(f"{n} follow-up(s) enviado(s).")
         return
 

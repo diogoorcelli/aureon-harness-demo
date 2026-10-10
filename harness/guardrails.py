@@ -87,11 +87,18 @@ def check_output(text: str, canary: str, max_chars: int = 1500) -> GuardResult:
     return GuardResult(True)
 
 
-_TYPES = {"string": str, "integer": int, "number": (int, float), "array": list, "boolean": bool}
+_TYPES = {"string": str, "integer": int, "number": (int, float), "array": list, "boolean": bool, "object": dict}
 
 
-def validate_args(schema: dict, args: dict) -> list[str]:
-    """Validação mínima de JSON Schema (required + type + enum)."""
+def validate_args(schema: dict, args: object) -> list[str]:
+    """Validação de um subconjunto de JSON Schema, recursiva.
+
+    Cobre type, required, enum, items, minItems/maxItems, minimum/maximum,
+    minLength/maxLength e pattern. Os argumentos de uma ferramenta precisam ser
+    um objeto: o modelo pode devolver lista, string ou JSON quebrado.
+    """
+    if not isinstance(args, dict):
+        return ["argumentos devem ser um objeto JSON"]
     errors: list[str] = []
     props = schema.get("properties", {})
     for key in schema.get("required", []):
@@ -101,12 +108,38 @@ def validate_args(schema: dict, args: dict) -> list[str]:
         spec = props.get(key)
         if spec is None:
             errors.append(f"campo desconhecido: {key}")
-            continue
-        expected = _TYPES.get(spec.get("type", ""), object)
-        if isinstance(value, bool) and spec.get("type") in ("integer", "number"):
-            errors.append(f"{key}: tipo inválido")
-        elif not isinstance(value, expected):
-            errors.append(f"{key}: esperado {spec.get('type')}")
-        elif "enum" in spec and value not in spec["enum"]:
-            errors.append(f"{key}: valor fora de {spec['enum']}")
+        else:
+            errors += _check_value(key, value, spec)
+    return errors
+
+
+def _check_value(path: str, value: object, spec: dict) -> list[str]:
+    kind = spec.get("type", "")
+    if (isinstance(value, bool) and kind in ("integer", "number")) or not isinstance(value, _TYPES.get(kind, object)):
+        return [f"{path}: esperado {kind}"]
+    if "enum" in spec and value not in spec["enum"]:
+        return [f"{path}: valor fora de {spec['enum']}"]
+    errors: list[str] = []
+    if isinstance(value, str):
+        if len(value) < spec.get("minLength", 0):
+            errors.append(f"{path}: mínimo de {spec['minLength']} caracteres")
+        if len(value) > spec.get("maxLength", len(value)):
+            errors.append(f"{path}: máximo de {spec['maxLength']} caracteres")
+        if "pattern" in spec and not re.search(spec["pattern"], value):
+            errors.append(f"{path}: formato inválido")
+    elif isinstance(value, (int, float)) and not isinstance(value, bool):
+        if value < spec.get("minimum", value):
+            errors.append(f"{path}: mínimo {spec['minimum']}")
+        if value > spec.get("maximum", value):
+            errors.append(f"{path}: máximo {spec['maximum']}")
+    elif isinstance(value, list):
+        if len(value) < spec.get("minItems", 0):
+            errors.append(f"{path}: mínimo de {spec['minItems']} itens")
+        if len(value) > spec.get("maxItems", len(value)):
+            errors.append(f"{path}: máximo de {spec['maxItems']} itens")
+        if "items" in spec:
+            for i, item in enumerate(value):
+                errors += _check_value(f"{path}[{i}]", item, spec["items"])
+    elif isinstance(value, dict) and kind == "object":
+        errors += [f"{path}.{e}" for e in validate_args(spec, value)]
     return errors

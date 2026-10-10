@@ -11,6 +11,8 @@
     "curso de arrais": 2800.0,
     "revisão de motor": 900.0
   },
+  "timezone": "-03:00",
+  "booking_horizon_days": 90,
   "approval_threshold": 5000.0,
   "allowed_tools": ["search_knowledge", "check_availability", "book_appointment", "create_quote"],
   "blocked_reply": "Não consigo ajudar com esse tipo de pedido, mas posso te falar de passeios, aluguel de lancha, cursos e manutenção. Em que posso ajudar?",

@@ -38,31 +38,44 @@ def _all_slots(hours: dict) -> list[str]:
     return [f"{h:02d}:00" for h in range(hours["start"], hours["end"])]
 
 
-def _open_day(d: date, ctx: ToolContext) -> bool:
-    return d.weekday() in ctx.tenant.business_hours["days"]
+def _starts_at(d: date, slot: str) -> datetime:
+    return datetime.combine(d, datetime.strptime(slot, "%H:%M").time())
+
+
+def _day_error(d: date | None, ctx: ToolContext) -> dict | None:
+    """Regras do dia, iguais para consulta e reserva. `ctx.now` é a hora local do tenant."""
+    if d is None:
+        return {"error": "invalid_day", "message": "Não entendi a data. Pode me dizer o dia, por exemplo 'amanhã' ou 2026-10-08?"}
+    if d < ctx.now.date():
+        return {"error": "past", "message": f"{d.isoformat()} já passou. Posso ver outro dia?"}
+    horizon = ctx.tenant.booking_horizon_days
+    if d > ctx.now.date() + timedelta(days=horizon):
+        return {"error": "too_far", "message": f"Agendamos com até {horizon} dias de antecedência. Posso ver uma data mais próxima?"}
+    if d.weekday() not in ctx.tenant.business_hours["days"]:
+        return {"error": "closed", "message": f"Não atendemos em {d.isoformat()} ({WEEKDAYS[d.weekday()]}). Posso ver outro dia?"}
+    return None
 
 
 def _availability(args: dict, ctx: ToolContext) -> dict:
     d = resolve_day(args["day"], ctx.now)
-    if d is None:
-        return {"error": "invalid_day", "message": "Não entendi a data. Pode me dizer o dia, por exemplo 'amanhã' ou 2026-10-08?"}
-    if not _open_day(d, ctx):
-        return {"error": "closed", "message": f"Não atendemos em {d.isoformat()} ({WEEKDAYS[d.weekday()]}). Posso ver outro dia?"}
+    if (error := _day_error(d, ctx)):
+        return error
     taken = ctx.store.booked_times(d.isoformat())
-    slots = [s for s in _all_slots(ctx.tenant.business_hours) if s not in taken]
+    slots = [
+        s for s in _all_slots(ctx.tenant.business_hours)
+        if s not in taken and _starts_at(d, s) >= ctx.now  # horário que já passou não é oferecido
+    ]
     return {"day": d.isoformat(), "slots": slots}
 
 
 def _book(args: dict, ctx: ToolContext) -> dict:
     d = resolve_day(args["day"], ctx.now)
-    if d is None:
-        return {"error": "invalid_day", "message": "Não entendi a data do agendamento."}
-    if not _open_day(d, ctx):
-        return {"error": "closed", "message": f"Não atendemos em {d.isoformat()} ({WEEKDAYS[d.weekday()]}). Posso ver outro dia?"}
+    if (error := _day_error(d, ctx)):
+        return error
     t = args["time"]
     if t not in _all_slots(ctx.tenant.business_hours):
         return {"error": "invalid_time", "message": f"Horário {t} fora do atendimento. Atendemos de hora em hora, das {ctx.tenant.business_hours['start']:02d}:00 às {ctx.tenant.business_hours['end']:02d}:00."}
-    if datetime.combine(d, datetime.strptime(t, "%H:%M").time()) < ctx.now:
+    if _starts_at(d, t) < ctx.now:
         return {"error": "past", "message": "Esse horário já passou. Posso ver outro?"}
     status, row = ctx.store.book(ctx.session_id, d.isoformat(), t, args["procedure"], ctx.now)
     if status == "slot_taken":
@@ -70,10 +83,12 @@ def _book(args: dict, ctx: ToolContext) -> dict:
     return {"status": status, "day": row["day"], "time": row["time"], "procedure": row["procedure"]}
 
 
+DAY_SCHEMA = {"type": "string", "minLength": 1, "maxLength": 20}
+
 CHECK_AVAILABILITY = Tool(
     name="check_availability",
     description="Lista horários livres em um dia (hoje, amanha, dia da semana ou AAAA-MM-DD).",
-    parameters={"type": "object", "properties": {"day": {"type": "string"}}, "required": ["day"]},
+    parameters={"type": "object", "properties": {"day": DAY_SCHEMA}, "required": ["day"]},
     fn=_availability,
 )
 
@@ -83,9 +98,9 @@ BOOK_APPOINTMENT = Tool(
     parameters={
         "type": "object",
         "properties": {
-            "day": {"type": "string"},
-            "time": {"type": "string", "description": "HH:MM"},
-            "procedure": {"type": "string"},
+            "day": DAY_SCHEMA,
+            "time": {"type": "string", "description": "HH:MM", "pattern": r"^\d{2}:\d{2}$"},
+            "procedure": {"type": "string", "minLength": 1, "maxLength": 100},
         },
         "required": ["day", "time", "procedure"],
     },
