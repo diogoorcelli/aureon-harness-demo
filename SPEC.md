@@ -1,6 +1,6 @@
 # SPEC — aureon-harness-demo
 
-Status: v0.3 · Esta spec é o contrato do projeto. Mudança de comportamento começa aqui, vira critério de aceite (eval ou teste) e só então vira código.
+Status: v0.4 · Esta spec é o contrato do projeto. Mudança de comportamento começa aqui, vira critério de aceite (eval ou teste) e só então vira código.
 
 > Nota de origem: a v0.1 foi escrita **depois** do primeiro código, a partir do que ele já fazia. Ela documenta e trava o comportamento atual. A partir da v0.2, o fluxo é spec primeiro (ver "Como evoluir").
 
@@ -46,13 +46,13 @@ Cada requisito tem um ID estável, um critério de aceite e a verificação auto
 - Aceite: "Quanto custa a limpeza de pele?" chama `search_knowledge` e a resposta contém R$ 180,00.
 - Verificação: `eval:warm_price_uses_rag` · `test:Components.test_rag_ranks_price_chunk_first`
 
-**FR-04 Agendamento seguro.** Só agenda em dia e horário de atendimento; repetir o mesmo pedido não duplica a reserva; horário ocupado é recusado.
-- Aceite: domingo é recusado pela ferramenta; o mesmo pedido duas vezes gera 1 agendamento.
-- Verificação: `eval:closed_day_rejected_by_tool` · `eval:booking_is_idempotent` · `eval:hot_booking_confirmed`
+**FR-04 Agendamento seguro.** Só agenda em dia e horário de atendimento, dentro do horizonte do tenant (`booking_horizon_days`, padrão 60); repetir o mesmo pedido não duplica a reserva; horário ocupado é recusado. A unicidade do horário é garantida pelo banco (`UNIQUE(day, time)`): a reserva tenta inserir primeiro e só então consulta quem ocupa o horário, sem janela de corrida entre checar e inserir. Horários que já passaram não aparecem na disponibilidade.
+- Aceite: domingo é recusado pela ferramenta; o mesmo pedido duas vezes gera 1 agendamento; duas conexões ao mesmo banco reservando o mesmo horário para sessões diferentes geram 1 confirmação e 1 `slot_taken` (nunca `tool_failed`); às 15h, a disponibilidade de hoje não lista 09:00; uma data além do horizonte é recusada.
+- Verificação: `eval:closed_day_rejected_by_tool` · `eval:booking_is_idempotent` · `eval:hot_booking_confirmed` · `test:Booking.test_second_connection_gets_slot_taken` · `test:Booking.test_past_slots_are_hidden_today` · `test:Booking.test_booking_beyond_horizon_is_refused`
 
-**FR-05 Orçamento com aprovação humana.** Orçamentos acima do limite do tenant ficam `pending_human_approval` e o cliente é avisado de que dependem da equipe.
-- Aceite: pacote noivas + drenagem (R$ 2.050,00 > R$ 1.500,00) fica pendente e gera o evento `human_approval_required`.
-- Verificação: `eval:high_quote_needs_human_approval`
+**FR-05 Orçamento com aprovação humana.** Orçamentos acima do limite do tenant ficam `pending_human_approval` e o cliente é avisado de que dependem da equipe. Orçamento sem itens, com item desconhecido ou com mais de 10 itens é recusado sem gravar nada; repetir um item conta como quantidade (ex.: 3 sessões). O id (`ORC-` + 10 hex) é derivado de tenant, sessão e itens, e um id igual vindo de outra sessão nunca sobrescreve o orçamento existente. O arquivo vai para `QUOTES_DIR/<tenant>/`. A gravação é atômica do ponto de vista do chamador: se o arquivo ou o banco falhar, não sobra registro nem arquivo órfão, e o evento `human_approval_required` só é emitido depois que os dois foram gravados.
+- Aceite: pacote noivas + drenagem (R$ 2.050,00 > R$ 1.500,00) fica pendente e gera o evento `human_approval_required`; `procedures: []` é recusado; falha simulada no arquivo não deixa linha em `quotes`; falha simulada no banco não deixa arquivo.
+- Verificação: `eval:high_quote_needs_human_approval` · `test:QuoteRules.test_empty_quote_is_refused` · `test:QuoteRules.test_repeated_item_counts_as_quantity` · `test:QuoteRules.test_failed_file_write_leaves_no_row` · `test:QuoteRules.test_failed_db_write_leaves_no_file` · `test:QuoteRules.test_same_id_from_other_session_does_not_overwrite`
 
 **FR-06 Follow-up automático.** Sem resposta do lead: cold após 48h (1x), warm após 24h (até 2x), hot após 8h (até 2x). Quando o lead responde, o ciclo reinicia.
 - Verificação: `test:Components.test_followup_rules`
@@ -62,7 +62,7 @@ Cada requisito tem um ID estável, um critério de aceite e a verificação auto
 
 **FR-08 Configuração por tenant.** Persona (nome e tom), nome da empresa, catálogo de preços, horário e dias de atendimento, limite de aprovação, ferramentas permitidas, mensagem de bloqueio e base de conhecimento e modo de busca (`retrieval`: `bm25` ou `hybrid`, e `rerank` ligado ou não) vêm só de `tenants/<slug>/config.json` e `tenants/<slug>/kb/`, nunca do código. Dois tenants com configurações diferentes se comportam de forma diferente, e nada de um aparece nas respostas do outro.
 - Aceite: com o tenant `demo_nautica` (aberto aos domingos, limite de aprovação maior, persona própria), o mesmo código agenda no domingo, aprova um orçamento que no tenant da clínica exigiria aprovação, responde com a persona própria, usa a mensagem de bloqueio própria e não conhece os preços da clínica.
-- Verificação: `eval:nautica_greeting_uses_tenant_persona` · `eval:nautica_price_from_own_kb` · `eval:nautica_books_on_sunday` · `eval:nautica_quote_within_own_threshold` · `eval:nautica_does_not_know_clinic_prices` · `eval:nautica_injection_uses_tenant_blocked_reply` · `test:TenantConfig.test_tenants_differ` · `test:TenantConfig.test_kb_dirs_are_separate`
+- Verificação: `eval:nautica_greeting_uses_tenant_persona` · `eval:nautica_price_from_own_kb` · `eval:nautica_books_on_sunday` · `eval:nautica_quote_within_own_threshold` · `eval:nautica_does_not_know_clinic_prices` · `eval:nautica_injection_uses_tenant_blocked_reply` · `test:TenantConfig.test_tenants_differ` · `test:TenantConfig.test_kb_dirs_are_separate` · `test:TenantConfig.test_quotes_and_traces_are_separated_by_tenant`
 
 **FR-09 Busca híbrida.** Um tenant com `retrieval.mode = "hybrid"` combina BM25 e busca vetorial, fundindo os dois rankings por Reciprocal Rank Fusion (k=60). O modo padrão continua sendo `bm25`, e o tenant que não pede híbrida não muda de comportamento. A busca vetorial recupera paráfrases com variação morfológica que o BM25 não encontra ("pagamentos" → "Formas de pagamento", "trabalham" → "atendimento"). O trace de `rag_search` registra o `mode` usado.
 - Aceite: no tenant `demo_nautica` (híbrido), "Quais pagamentos vocês aceitam?" encontra a política de pagamento e a resposta contém Pix; "Vocês trabalham no domingo?" responde "todos os dias". No tenant `demo_clinica` (bm25), a mesma pergunta continua sem resposta ("Não encontrei isso na minha base"). Os evals que já passavam continuam passando no modo híbrido.
@@ -82,10 +82,15 @@ Cada requisito tem um ID estável, um critério de aceite e a verificação auto
 - Limite declarado: testado só contra respostas simuladas, nunca contra a API real neste repositório.
 - Verificação: `test:CohereClients.test_embed_request_shape` · `test:CohereClients.test_embed_batches_at_96` · `test:CohereClients.test_rerank_request_and_parse` · `test:CohereClients.test_missing_key_fails_early`
 
+**FR-13 Política de horário.** Cada tenant declara `timezone` como deslocamento UTC fixo (`"-03:00"`). Dentro do harness, todo horário é a hora local do tenant: "hoje", "amanhã", horário passado e timestamps gravados. Sem `now` explícito, o `Agent` usa o relógio do tenant, nunca o fuso do servidor (um container em UTC não muda o resultado). Um `now` com fuso é convertido para a hora local do tenant. Um `timezone` inválido falha no carregamento do tenant.
+- Aceite: às 01:00 UTC de terça, "amanhã" no tenant `-03:00` é terça (ainda é segunda às 22:00 local); sem `now`, o relógio do agente bate com UTC−3; `"timezone": "Brasília"` gera erro claro.
+- Limite declarado: deslocamento fixo não acompanha horário de verão (o Brasil não tem desde 2019). Ver ADR-09.
+- Verificação: `test:TimePolicy.test_default_clock_is_tenant_local` · `test:TimePolicy.test_aware_now_is_converted` · `test:TimePolicy.test_invalid_timezone_is_rejected`
+
 ### Segurança
 
 **SEC-01 Injection direta bloqueada.** Mensagens que tentam anular instruções ou extrair o prompt não chegam ao modelo e recebem resposta padrão do tenant.
-- Verificação: `eval:direct_prompt_injection_blocked` · `test:Components.test_input_guard`
+- Verificação: `eval:direct_prompt_injection_blocked` · `eval:direct_injection_english_variant` · `test:Components.test_input_guard`
 
 **SEC-02 Injection indireta mitigada.** Trechos da base com instruções embutidas são descartados antes de chegar ao modelo; o conteúdo recuperado entra marcado como `<documento>` (dado, não instrução).
 - Verificação: `eval:indirect_injection_in_kb_dropped`
@@ -93,8 +98,13 @@ Cada requisito tem um ID estável, um critério de aceite e a verificação auto
 **SEC-03 Sem vazamento do system prompt.** Uma resposta que contenha o canary token é barrada e vira handoff.
 - Verificação: `test:Resilience.test_canary_leak_is_blocked`
 
-**SEC-04 Ferramentas sob controle do harness.** Só rodam ferramentas da allowlist do tenant, com argumentos validados contra o JSON Schema.
-- Verificação: `test:Resilience.test_disallowed_tool_is_refused` · `test:Components.test_validate_args`
+**SEC-04 Ferramentas sob controle do harness.** Só rodam ferramentas da allowlist do tenant, com argumentos validados contra o JSON Schema. Os argumentos precisam ser um objeto: lista, string, número ou JSON inválido vindo do modelo vira `invalid_arguments`, devolvido ao modelo, sem derrubar o turno. A validação é recursiva e cobre `type`, `required`, `enum`, `items`, `minItems`/`maxItems`, `minimum`/`maximum`, `minLength`/`maxLength` e `pattern`. Toda ferramenta declara limites para o que recebe (tamanho de texto, quantidade de itens, faixa de `k`).
+- Aceite: argumentos `"oi"` ou `["x"]` geram `invalid_arguments` e a conversa segue; `procedures: [123]`, `k: -5` e `k: 1000` são recusados antes de a ferramenta rodar; `arguments` com JSON quebrado chega ao harness como argumento inválido, não como `{}`.
+- Verificação: `test:Resilience.test_disallowed_tool_is_refused` · `test:Components.test_validate_args` · `test:ToolArgs.test_non_object_arguments_do_not_crash_turn` · `test:ToolArgs.test_nested_schema_rules` · `test:ToolArgs.test_tool_inputs_are_bounded` · `test:LLMClient.test_invalid_json_arguments_are_not_silenced`
+
+**SEC-05 ID de sessão nunca vira caminho.** O nome do arquivo de trace é uma referência opaca, `HMAC-SHA256(chave, "<tenant>|<sessão>")` truncada, nunca o ID cru. IDs com `..`, `/`, `\` ou `:` não escapam do diretório de traces nem criam *alternate data streams* no NTFS (`wa:5547…` no Windows). A chave vem de `TRACE_PSEUDONYM_KEY`; sem ela, usa uma chave de demonstração. O `Agent` recusa ID de sessão vazio, que não seja texto ou com mais de 200 caracteres.
+- Aceite: `../fora`, `wa:5547999990000`, `a/b\\c` e um ID com acentos geram um arquivo `<hex>.jsonl` dentro do diretório de traces; `""` e um ID de 201 caracteres levantam `ValueError`.
+- Verificação: `test:SessionIds.test_trace_path_stays_inside_dir` · `test:SessionIds.test_invalid_session_id_is_rejected`
 
 ### Confiabilidade e observabilidade
 
@@ -104,9 +114,27 @@ Cada requisito tem um ID estável, um critério de aceite e a verificação auto
 **REL-02 Loop limitado.** O loop tem número máximo de passos; ao estourar, faz handoff.
 - Verificação: `test:Resilience.test_max_steps_hands_off`
 
-**OBS-01 Trace por turno.** Cada turno grava uma linha JSON em `traces/<sessão>.jsonl` com `session`, `user`, `events`, `reply` e `total_ms`. Cada evento tem `t_ms` e `type`, e `type` pertence ao catálogo `EVENT_TYPES` (`harness/tracing.py`), documentado em `docs/ARCHITECTURE.md`. O último evento de todo turno é `final`.
+**REL-03 Resposta inválida do LLM.** Resposta vazia e sem ferramentas não chega ao cliente: vira handoff (`reason: empty_reply`). Resposta malformada do provedor (sem `choices`, formato inesperado) vira `LLMError` e entra na cadeia de fallback. Qualquer exceção inesperada do cliente de LLM é tratada como falha daquele modelo (evento `llm_error`), não como erro do turno.
+- Aceite: `LLMResponse("")` gera handoff; `{"choices": []}` do OpenRouter levanta `LLMError`; um cliente que levanta `IndexError` no modelo "hot" é substituído pelo fallback e a conversa continua.
+- Verificação: `test:Resilience.test_empty_reply_hands_off` · `test:Resilience.test_unexpected_llm_exception_falls_back` · `test:LLMClient.test_malformed_response_raises_llm_error`
+
+**REL-04 Limites por turno.** Além de `max_steps`, cada turno tem prazo (`turn_deadline_s`, padrão 45 s), orçamento de tokens (`turn_token_budget`, padrão 20.000, somando `usage.total_tokens`) e teto de chamadas de ferramenta (`max_tool_calls`, padrão 8). Ao estourar qualquer um, o harness faz handoff e registra o motivo (`deadline_exceeded`, `token_budget_exceeded`, `tool_call_limit_exceeded`).
+- Limite declarado: o prazo é verificado entre chamadas; uma chamada individual ao LLM é limitada pelo `timeout` do cliente.
+- Verificação: `test:Resilience.test_turn_deadline_hands_off` · `test:Resilience.test_token_budget_hands_off` · `test:Resilience.test_tool_call_limit_hands_off`
+
+**REL-05 Erro interno vira handoff.** Um erro inesperado dentro do turno (fora do LLM e das ferramentas, que já têm tratamento próprio) não derruba o canal: o cliente recebe a mensagem de handoff, a resposta é persistida e o trace registra `handoff` com `reason: internal_error` e o tipo do erro.
+- Verificação: `test:Resilience.test_internal_error_hands_off`
+
+**OBS-01 Trace por turno.** Cada turno grava uma linha JSON em `traces/<ref>.jsonl`, onde `<ref>` é a referência opaca da SEC-05, com `session` (a mesma `<ref>`), `tenant`, `user`, `events`, `reply` e `total_ms`. Cada evento tem `t_ms` e `type`, e `type` pertence ao catálogo `EVENT_TYPES` (`harness/tracing.py`), documentado em `docs/ARCHITECTURE.md`. O último evento de todo turno é `final`.
 - Aceite: o arquivo de trace de uma sessão com vários turnos é JSONL válido, todo evento emitido está no catálogo e todo tipo do catálogo está documentado.
 - Verificação: `test:TraceFormat.test_trace_file_schema` · `test:TraceFormat.test_event_types_are_documented`
+
+**OBS-02 Dados pessoais mascarados no trace.** CPF, CNPJ, e-mail e telefone são mascarados em todo texto que vai para o trace (mensagem do usuário, resposta, argumentos de ferramenta, consultas ao RAG, erros). Preços, datas, horários e ids de orçamento não são afetados.
+- Limite declarado: nomes próprios em texto livre não são detectados. O banco de conversas (`messages`) guarda o texto original, porque o atendimento precisa dele; o mascaramento protege a trilha de observabilidade, que circula mais.
+- Verificação: `test:Privacy.test_trace_masks_personal_data` · `test:Privacy.test_redaction_keeps_prices_dates_and_times`
+
+**OBS-03 Modelo efetivo registrado.** `AgentReply.model` e o evento `final` trazem o modelo que de fato respondeu, depois de qualquer fallback. O evento `route` continua registrando o modelo escolhido pela temperatura.
+- Verificação: `test:Resilience.test_reply_reports_effective_model`
 
 ### Não funcionais
 
@@ -123,6 +151,8 @@ Cada requisito tem um ID estável, um critério de aceite e a verificação auto
 | D4 | `MockLLM` determinístico | evals reproduzíveis no CI | testa o harness, não a qualidade do modelo |
 | D5 | Guardrails em duas camadas | regex sozinha não basta | camada 1 gera falsos positivos raros |
 | D6 | Estado em SQLite | zero setup | não substitui Postgres em produção |
+| D7 | Fuso do tenant como deslocamento UTC fixo | `zoneinfo` exige o pacote `tzdata` no Windows, o que quebraria o zero dependências | não acompanha horário de verão |
+| D8 | Trace com referência HMAC e mascaramento por padrão | trace circula mais que o banco (logs, suporte, ferramentas de observabilidade) | correlacionar trace e lead exige a chave |
 
 ## 6. Como evoluir (fluxo spec-driven)
 
@@ -135,7 +165,10 @@ Cada requisito tem um ID estável, um critério de aceite e a verificação auto
 ## 7. Lacunas conhecidas
 
 - **FR-08** e **OBS-01**: fechadas na v0.2 (segundo tenant e teste do formato do trace).
-- **Isolamento entre tenants**: FR-08 prova que a base e a configuração de um tenant não vazam para outro neste demo, mas o isolamento de dados em banco (schema por cliente) está fora do escopo.
+- **Robustez (v0.4)**: fechadas a validação profunda de argumentos (SEC-04), o caminho de trace derivado do ID de sessão (SEC-05), as regras de orçamento e agenda (FR-04, FR-05), o fuso por tenant (FR-13), as respostas inválidas do LLM (REL-03), os limites por turno (REL-04), o erro interno (REL-05), o mascaramento de dados pessoais (OBS-02) e o modelo efetivo (OBS-03).
+- **Isolamento entre tenants**: FR-08 prova que a base, a configuração, os orçamentos e os traces de um tenant não se misturam com os de outro neste demo, mas o isolamento de dados em banco (schema por cliente) está fora do escopo.
+- **Concorrência**: a reserva é segura entre conexões (FR-04), mas o `Store` usa uma conexão SQLite por processo e não foi exercitado sob carga com vários workers.
+- **Privacidade**: o mascaramento (OBS-02) é por padrões e não pega nomes próprios; o banco de conversas guarda o texto original e não tem política de retenção.
 - **FR-02/FR-03 com modelo real**: só o `--live` exercita; não há eval com juiz (LLM-as-judge).
 - **FR-09/FR-10 com embeddings reais**: o CI usa o embedder offline (n-gramas) e o reranker lexical. Não há eval com Cohere; o ganho semântico real só aparece com `--live` e chave.
 - **FR-11/FR-12**: o pgvector é exercitado no CI por um Postgres de serviço, mas o cliente Cohere nunca foi testado contra a API real (só contra respostas simuladas).
@@ -144,6 +177,7 @@ Cada requisito tem um ID estável, um critério de aceite e a verificação auto
 ## 8. Roadmap (próximas specs)
 
 - ~~v0.2 — segundo tenant (fecha FR-08) e teste do formato de trace (fecha OBS-01)~~ (concluída)
-- ~~v0.3 — busca híbrida (BM25 + vetorial com RRF), reranking, pgvector opcional e clientes Cohere, com eval de recall~~ (esta versão)
-- v0.4 — LLM-as-judge nos evals `--live` e métrica de custo por conversa a partir do `usage`
-- v0.5 — suíte adversarial de injection (direta e indireta)
+- ~~v0.3 — busca híbrida (BM25 + vetorial com RRF), reranking, pgvector opcional e clientes Cohere, com eval de recall~~ (concluída)
+- ~~v0.4 — robustez: validação de argumentos, ID de sessão seguro, regras de orçamento e agenda, fuso por tenant, respostas inválidas do LLM, limites por turno e privacidade nos traces~~ (esta versão)
+- v0.5 — LLM-as-judge nos evals `--live` e métrica de custo por conversa a partir do `usage`
+- v0.6 — suíte adversarial de injection (direta e indireta)
