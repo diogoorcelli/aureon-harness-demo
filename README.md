@@ -32,8 +32,8 @@ O modelo de linguagem é só uma peça. O **harness** é tudo o que o transforma
 
 ```bash
 python -m adapters.cli                      # conversa no terminal (LLM simulado)
-python -m evals.run_evals                   # 17 casos de avaliação (2 tenants)
-python -m unittest                          # 38 testes (1 só roda com Postgres; inclui rastreabilidade da spec e regras de stack)
+python -m evals.run_evals                   # 18 casos de avaliação (2 tenants)
+python -m unittest                          # 66 testes (1 só roda com Postgres; inclui rastreabilidade da spec e regras de stack)
 python -m adapters.cli --tenant demo_nautica   # mesmo código, outro cliente
 python -m adapters.mock_webhook --text "Quanto custa a limpeza de pele?" --replay
 python -m adapters.cli --followups --advance-hours 50
@@ -82,7 +82,7 @@ Luna> Agendado: avaliação em 2026-10-06 às 15:00. Te espero! — Luna
 
 ```text
 você> Quero um orçamento do pacote noivas e da drenagem linfática
-Luna> Montei o orçamento ORC-D7590B (total R$ 2.050,00). Como o valor é mais alto, ele passa por aprovação da equipe antes de eu te enviar.
+Luna> Montei o orçamento ORC-3F6EC5C296 (total R$ 2.050,00). Como o valor é mais alto, ele passa por aprovação da equipe antes de eu te enviar.
    [warm · anthropic/claude-sonnet-4.5 · tools: create_quote]
 ```
 
@@ -130,6 +130,25 @@ Maré> Formas de pagamento: Aceitamos Pix e cartão de crédito em até 6x.
 
 Limites, ditos com clareza: o embedder offline cobre plural e flexão, **não sinônimos**, e deixa passar trechos fracos; ganho semântico de verdade exige embeddings reais, que o CI não exercita. O pgvector é testado no CI contra um Postgres de verdade e confere com o índice em memória. Os clientes da Cohere foram testados só contra respostas simuladas, nunca contra a API real.
 
+## Robustez (v0.4)
+
+Depois de uma revisão de código, cada problema encontrado virou um requisito na spec, um teste que falhava e, por último, a correção. A tabela resume o que mudou.
+
+| Situação | Como era | Como ficou |
+|---|---|---|
+| O modelo envia argumentos que não são um objeto, como `"oi"` ou `["x"]` | o turno quebrava com `AttributeError` | o modelo recebe `invalid_arguments` e a conversa continua |
+| Argumentos fora do esperado, como `k: -5`, `procedures: [123]` ou `procedures: []` | passavam direto, e a lista vazia gerava um orçamento de R$ 0,00 | os schemas têm limites e são validados por completo antes de a ferramenta rodar |
+| ID de sessão com `..` ou `:` | ia direto para o nome do arquivo de trace; no Windows, `wa:<telefone>` criava um alternate data stream e o trace ficava invisível | o nome do arquivo é um HMAC e fica sempre dentro de `traces/` |
+| Duas pessoas reservando o mesmo horário ao mesmo tempo | a segunda reserva falhava com `tool_failed` | o `UNIQUE` do banco decide, e a segunda recebe `slot_taken` |
+| Servidor rodando em UTC, como no Docker | "hoje" e "esse horário já passou" erravam por 3 horas | cada tenant declara o próprio fuso (`"timezone": "-03:00"`) |
+| Falha ao gravar o orçamento | podia sobrar uma linha no banco sem o arquivo | o arquivo é gravado num temporário, o banco é atualizado e só então o arquivo recebe o nome final; se algo falhar no caminho, nada fica pela metade |
+| CPF, e-mail e telefone do cliente | apareciam no trace | são mascarados como `[CPF]`, `[EMAIL]` e `[TELEFONE]` |
+| Resposta vazia ou malformada do LLM | o cliente recebia uma mensagem vazia, e um `IndexError` escapava do fallback | vira handoff ou passa para o próximo modelo da cadeia |
+| Turno lento ou caro | só havia limite de passos | também há prazo, teto de tokens e teto de chamadas de ferramenta |
+| Fallback de modelo | `reply.model` mostrava o modelo escolhido pelo roteador | mostra o modelo que de fato respondeu |
+
+Ainda ficam de fora: nomes próprios escritos no meio da conversa não são mascarados, o banco de conversas guarda o texto original e o `Store` nunca foi testado sob carga com vários processos. Esses pontos estão na seção 7 da [`SPEC.md`](SPEC.md).
+
 ## Desenvolvimento orientado por spec
 
 O contrato do projeto está em [`SPEC.md`](SPEC.md): requisitos com ID (`FR-04`, `SEC-02`...), critério de aceite e a verificação automatizada de cada um. Um teste (`tests/test_spec_traceability.py`) falha se a spec citar um eval ou teste que não existe, ou se um eval existir sem requisito. O fluxo para mudar o comportamento é: spec → eval/teste que falha → código → verde. As lacunas conhecidas e o roadmap também estão lá. Stack, camadas, contratos e decisões de arquitetura (ADRs) estão em [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
@@ -138,7 +157,7 @@ O contrato do projeto está em [`SPEC.md`](SPEC.md): requisitos com ID (`FR-04`,
 
 | Componente | Onde | O que demonstra |
 |---|---|---|
-| Loop do agente | `harness/loop.py` | pensar → chamar ferramenta → observar; limite de passos; fallback; handoff |
+| Loop do agente | `harness/loop.py` | pensar → chamar ferramenta → observar; limites de passos, tempo, tokens e ferramentas; fallback; handoff |
 | Camada de LLM | `harness/llm.py` | interface única, OpenRouter com retry/backoff, `MockLLM` determinístico |
 | Roteamento de modelos | `harness/router.py` | modelo por temperatura do lead e cadeia de fallback |
 | Ferramentas | `harness/tools/` | schema JSON, validação de argumentos, tratamento de falha, idempotência |
@@ -147,16 +166,16 @@ O contrato do projeto está em [`SPEC.md`](SPEC.md): requisitos com ID (`FR-04`,
 | Contexto e memória | `loop._build_messages`, `store.py` | janela de histórico, compactação simples, estado em SQLite |
 | Guardrails | `harness/guardrails.py` | defesa em duas camadas (ver abaixo) |
 | Human-in-the-loop | `tools/quote.py` | orçamento acima do limite fica `pending_human_approval` |
-| Observabilidade | `harness/tracing.py` | um trace JSONL por turno: rota, LLM, ferramentas, guardrails |
+| Observabilidade | `harness/tracing.py`, `harness/privacy.py` | um trace JSONL por turno (rota, LLM, ferramentas, guardrails), com nome de arquivo pseudonimizado e dados pessoais mascarados |
 | Avaliação | `evals/`, `tests/` | casos com resultado esperado, rodando no CI |
 | Follow-up agendado | `harness/followup.py` | regras por temperatura (48h/24h/8h) acionadas por job |
 | Canal plugável | `adapters/` | CLI e webhook simulado com HMAC-SHA256 e deduplicação |
-| Multi-tenant | `tenants/<slug>/` | persona, preços, horários, limite de aprovação, ferramentas e base por configuração; dois tenants de exemplo (`demo_clinica`, `demo_nautica`) |
+| Multi-tenant | `tenants/<slug>/` | persona, preços, horários, fuso, horizonte de agenda, limite de aprovação, ferramentas e base por configuração; dois tenants de exemplo (`demo_clinica`, `demo_nautica`) |
 
 ## Segurança em duas camadas
 
 1. **Triagem por padrões**, barata e anterior ao LLM: bloqueia tentativas óbvias de injection na mensagem do usuário e **descarta trechos envenenados da base de conhecimento** (injection indireta). O arquivo `tenants/demo_clinica/kb/zz_importado_nao_confiavel.md` simula esse ataque.
-2. **Defesas estruturais**, que não dependem de reconhecer o ataque: conteúdo recuperado entra no prompt dentro de `<documento>` e é declarado como dado; *canary token* no system prompt barra vazamento; allowlist de ferramentas por tenant; validação de argumentos; aprovação humana para ações de alto valor.
+2. **Defesas estruturais**, que não dependem de reconhecer o ataque: conteúdo recuperado entra no prompt dentro de `<documento>` e é declarado como dado; *canary token* no system prompt barra vazamento; allowlist de ferramentas por tenant; validação recursiva de argumentos com limites; aprovação humana para ações de alto valor.
 
 Limitações honestas: regex não pega todo ataque (a camada 2 existe por isso), e o `MockLLM` é determinístico, então os evals mock testam o **harness**, não a qualidade do modelo. Para isso há `--live`.
 
@@ -177,7 +196,7 @@ Eval de recall com embeddings reais (Cohere), Google Calendar real no lugar do `
 ```
 SPEC.md     requisitos, critérios de aceite, decisões e roadmap
 docs/       ARCHITECTURE.md (stack, camadas, contratos, modelo de dados, ADRs)
-harness/    loop, llm, router, guardrails, rag, store, tracing, followup, tools/,
+harness/    loop, llm, router, guardrails, rag, store, tracing, privacy, followup, tools/,
             retrieval/ (híbrida, rerank, Cohere), optional/ (pgvector)
 adapters/   cli, mock_webhook, common
 tenants/    demo_clinica/ e demo_nautica/ (config.json + kb/*.md)

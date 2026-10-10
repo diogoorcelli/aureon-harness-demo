@@ -26,7 +26,7 @@ Demonstrar, em um repositório pequeno e legível, os componentes de um harness 
 
 ## 3.1 Stack e arquitetura
 
-Stack, camadas, contratos entre componentes, modelo de dados e decisões (ADR-01 a ADR-06) estão em [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). Resumo: Python 3.10+ só com biblioteca padrão, núcleo como biblioteca (sem framework web), SQLite, BM25 por padrão com busca híbrida (vetorial + reranking) opcional, OpenRouter ou `MockLLM`, sem frontend. Mudança de stack começa como ADR novo naquele documento.
+Stack, camadas, contratos entre componentes, modelo de dados e decisões (ADR-01 a ADR-10) estão em [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). Resumo: Python 3.10+ só com biblioteca padrão, núcleo como biblioteca (sem framework web), SQLite, BM25 por padrão com busca híbrida (vetorial + reranking) opcional, OpenRouter ou `MockLLM`, sem frontend. Mudança de stack começa como ADR novo naquele documento.
 
 ## 4. Requisitos
 

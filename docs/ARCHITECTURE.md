@@ -59,8 +59,8 @@ Trocar uma implementação (por exemplo, o índice em memória pelo pgvector) n�
 |---|---|---|
 | `leads` | nome, temperatura, timestamps e contador de follow-up por sessão | `session_id` |
 | `messages` | histórico de conversa (só `user` e `assistant`) | `id` |
-| `appointments` | agenda (FakeCalendar) | `UNIQUE(day, time)` |
-| `quotes` | orçamentos e status de aprovação | `id` |
+| `appointments` | agenda (FakeCalendar); a reserva insere primeiro e o `UNIQUE` decide quem fica com o horário | `UNIQUE(day, time)` |
+| `quotes` | orçamentos e status de aprovação; um id só é atualizado pela sessão dona dele | `id` |
 | `processed_events` | deduplicação de webhooks | `event_id` |
 
 Tabela opcional, em PostgreSQL (só com `PgVectorStore`):
@@ -71,25 +71,25 @@ Tabela opcional, em PostgreSQL (só com `PgVectorStore`):
 
 ## 5. Fluxo de um turno
 
-1. O adapter entrega `(session_id, texto)` ao `Agent`.
+1. O adapter entrega `(session_id, texto)` ao `Agent`, que recusa ID vazio, que não seja texto ou com mais de 200 caracteres. O relógio do turno é a hora local do tenant (`timezone` no `config.json`); todo datetime interno segue essa convenção, sem `tzinfo`.
 2. Guardrail de entrada: se bloquear, responde com a mensagem padrão do tenant e encerra.
 3. Roteador: classifica a temperatura (só sobe) e escolhe o modelo.
 4. Monta o contexto: system prompt do tenant + janela das últimas 12 mensagens.
-5. Loop (até `max_steps`): LLM → se pedir ferramentas, valida allowlist e argumentos, executa, devolve o resultado → repete.
-6. Guardrail de saída (canary); resposta final persistida.
-7. Trace do turno gravado em JSONL.
+5. Loop (até `max_steps`, `turn_deadline_s`, `turn_token_budget` e `max_tool_calls`): LLM → se pedir ferramentas, valida allowlist e argumentos, executa, devolve o resultado → repete.
+6. Guardrail de saída (resposta vazia, canary, tamanho); resposta final persistida.
+7. Trace do turno gravado em JSONL, com dados pessoais mascarados.
 
-Em qualquer falha irrecuperável (todos os modelos fora, passos esgotados, vazamento) o resultado é handoff para humano.
+Em qualquer falha irrecuperável o resultado é handoff para humano, com o motivo no trace: `llm_unavailable` (todos os modelos falharam), `max_steps_exceeded`, `deadline_exceeded`, `token_budget_exceeded`, `tool_call_limit_exceeded`, `empty_reply`, `output_blocked` ou `internal_error` (erro inesperado no turno, com o tipo do erro).
 
 ## 5.1 Catálogo de eventos do trace
 
-Cada linha de `traces/<sessão>.jsonl` é um turno com `session`, `user`, `events`, `reply` e `total_ms`. Cada evento tem `t_ms` e `type`; os tipos possíveis são os de `EVENT_TYPES` em `harness/tracing.py`, e o último evento de um turno é sempre `final`.
+Cada linha de `traces/<ref>.jsonl` é um turno com `session`, `tenant`, `user`, `events`, `reply` e `total_ms`. `<ref>` (também o valor de `session`) é `HMAC-SHA256(TRACE_PSEUDONYM_KEY, "<tenant>|<sessão>")` truncado em 20 hex: o ID cru nunca vira caminho, e quem tem a chave encontra o trace de uma sessão com `harness.tracing.session_ref(tenant, sessão)`. Todo texto (mensagem, resposta, argumentos, consultas, erros) passa por `harness/privacy.py`, que troca CPF, CNPJ, e-mail e telefone por `[CPF]`, `[CNPJ]`, `[EMAIL]` e `[TELEFONE]`. Cada evento tem `t_ms` e `type`; os tipos possíveis são os de `EVENT_TYPES` em `harness/tracing.py`, e o último evento de um turno é sempre `final`.
 
 | Tipo | Quando é emitido |
 |---|---|
 | `route` | temperatura do lead e modelo escolhido |
-| `llm_call` | chamada ao LLM concluída (modelo, uso, ferramentas pedidas) |
-| `llm_error` | um modelo falhou; o harness tenta o próximo da cadeia |
+| `llm_call` | chamada ao LLM concluída (modelo que respondeu, uso, ferramentas pedidas) |
+| `llm_error` | um modelo falhou (erro do provedor, resposta malformada ou exceção do cliente); o harness tenta o próximo da cadeia |
 | `tool_call` | ferramenta executada (nome, argumentos, sucesso) |
 | `rag_search` | busca na base (consulta, fontes devolvidas, `mode` `bm25` ou `hybrid` e, se o reranker falhou, `rerank_error`) |
 | `rag_chunk_dropped` | trecho da base descartado por conter instruções embutidas |
@@ -97,12 +97,12 @@ Cada linha de `traces/<sessão>.jsonl` é um turno com `session`, `user`, `event
 | `guardrail_output_blocked` | resposta barrada na saída (canary ou tamanho) |
 | `guardrail_tool_blocked` | ferramenta pedida fora da allowlist do tenant |
 | `human_approval_required` | ação de alto valor aguardando aprovação humana |
-| `handoff` | conversa passada a uma pessoa (LLM fora, passos esgotados ou saída barrada) |
-| `final` | fim do turno (bloqueado, handoff, número de passos) |
+| `handoff` | conversa passada a uma pessoa, com `reason` (ver os motivos na seção 5) |
+| `final` | fim do turno (bloqueado, handoff, número de passos e `model`, o modelo que de fato respondeu) |
 
 ## 5.2 Configuração por tenant
 
-Tudo o que muda de cliente para cliente fica em `tenants/<slug>/`: `config.json` (empresa, persona, preços, horário e dias de atendimento, limite de aprovação, ferramentas permitidas, mensagem de bloqueio e `retrieval`: `{"mode": "bm25" | "hybrid", "rerank": true | false}`, padrão `bm25` sem rerank) e `kb/*.md` (base de conhecimento). O código não tem nenhum valor específico de tenant. O repositório traz dois: `demo_clinica` (clínica de estética, fecha aos domingos, aprovação acima de R$ 1.500) e `demo_nautica` (marina, aberta todos os dias, aprovação acima de R$ 5.000, busca híbrida com reranking), que existem para provar que o mesmo código se comporta de forma diferente só pela configuração.
+Tudo o que muda de cliente para cliente fica em `tenants/<slug>/`: `config.json` (empresa, persona, preços, horário e dias de atendimento, `timezone` como deslocamento UTC, padrão `+00:00`, `booking_horizon_days`, padrão 60, limite de aprovação, ferramentas permitidas, mensagem de bloqueio e `retrieval`: `{"mode": "bm25" | "hybrid", "rerank": true | false}`, padrão `bm25` sem rerank) e `kb/*.md` (base de conhecimento). O código não tem nenhum valor específico de tenant. O repositório traz dois: `demo_clinica` (clínica de estética, fecha aos domingos, aprovação acima de R$ 1.500) e `demo_nautica` (marina, aberta todos os dias, aprovação acima de R$ 5.000, busca híbrida com reranking), que existem para provar que o mesmo código se comporta de forma diferente só pela configuração.
 
 ## 6. Decisões (ADRs)
 
@@ -121,6 +121,10 @@ Tudo o que muda de cliente para cliente fica em `tenants/<slug>/`: `config.json`
 **ADR-07 · Recuperação em camadas, BM25 como padrão.** Contexto: embeddings melhoram a recuperação de paráfrases, mas custam chave, rede ou dependência, e o CI precisa continuar offline. Decisão: busca híbrida opcional por tenant (BM25 + vetorial, fusão por Reciprocal Rank Fusion com k=60, reranking opcional), tudo atrás da interface `Retriever`. O embedder padrão é um hash de n-gramas de caracteres, offline; `CohereEmbedder` e `CohereReranker` entram por variável de ambiente. Alternativas: trocar o BM25 por embeddings (perde o modo offline), `sentence-transformers` (dependência pesada). Consequência: o hash cobre flexão (plural, conjugação) mas não sinônimos; o ganho semântico real só aparece com embeddings reais, que o CI não exercita. O embedder offline também deixa passar trechos fracos; o `min_score` (0,15) e o reranker reduzem, não eliminam.
 
 **ADR-08 · Extras opcionais isolados.** Contexto: o pgvector exige `psycopg`, e o núcleo promete zero dependências. Decisão: integrações com pacote externo moram em `harness/optional/`, importam o pacote dentro de função e declaram a dependência em `requirements-extras.txt`; um teste de stack falha se isso for violado. O vetor vai como texto com cast `::vector`, então o pacote Python `pgvector` também não é necessário. Alternativas: dependência obrigatória (quebra o NFR-01), plugin separado (mais estrutura que o demo precisa). Consequência: quem não usa pgvector não instala nada; o caminho do pgvector é testado no CI com um Postgres de serviço.
+
+**ADR-09 · Fuso do tenant como deslocamento UTC fixo.** Contexto: `datetime.now()` sem fuso usa o relógio do servidor; num container em UTC, "hoje", "amanhã" e "esse horário já passou" erravam 3 horas para um tenant no Brasil. Decisão: cada tenant declara `"timezone": "-03:00"`; o `Agent` converte tudo para a hora local do tenant na entrada do turno, e daí em diante os datetimes não carregam `tzinfo`. Alternativas: `zoneinfo` com nome IANA (`America/Sao_Paulo`), que é o certo quando há horário de verão, mas no Windows exige o pacote `tzdata` e quebraria o NFR-01; guardar tudo em UTC e converter na borda das ferramentas, que espalharia conversões pelo código. Consequência: sem dependência e com uma convenção só; um tenant num fuso com horário de verão precisaria de `zoneinfo` (o Brasil não tem desde 2019).
+
+**ADR-10 · Trace pseudonimizado e mascarado por padrão.** Contexto: o trace circula mais que o banco (logs, suporte, ferramentas de observabilidade), e o nome do arquivo vinha do ID de sessão, que no WhatsApp é o telefone. Decisão: nome de arquivo e campo `session` viram `HMAC-SHA256(chave, tenant|sessão)`; todo texto passa por um mascarador de CPF, CNPJ, e-mail e telefone. O banco de conversas continua com o texto original, porque o atendimento precisa dele. Alternativas: hash sem chave (telefone é enumerável, daria para reverter), criptografar o trace (mais pesado e ainda exige gestão de chave). Consequência: o trace de uma sessão só é encontrado por quem tem a chave; o mascaramento é por padrões e não pega nomes próprios.
 
 ## 7. Relação com o sistema real que inspirou o demo
 
